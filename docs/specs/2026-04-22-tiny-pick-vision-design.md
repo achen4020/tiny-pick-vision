@@ -211,8 +211,10 @@ typedef struct {
     Features mean;
     int32_t  L_inv[N_FEAT*(N_FEAT+1)/2];  // 下三角 L⁻¹，Q16.16
     int32_t  reject_thresh;               // **平方**马氏距离，Q16.16
+                                          // 标定保证 ≥ 1（见 §8 第 6 步下界检查）
     int32_t  margin;                      // AMBIGUOUS 判别阈值（平方距离单位，Q16.16）
-                                          // 见 §8 第 7 步标定推导
+                                          // N_CLASSES ≥ 2 时标定保证 ≥ 1；N_CLASSES = 1 时为 0
+                                          // 见 §8 第 7 步下界检查及单类特判
 } Template;                               // 40 + 55*4 + 4 + 4 = 268 B，×5 ≈ 1.34 KB
 // 本规范全部距离默认为平方马氏距离，除非明确说明。
 // 运行时任何地方都不做 sqrt，比较始终在平方空间进行。
@@ -272,7 +274,7 @@ static uint32_t g_uf_parent[MAX_LABELS + 1];  // 262.1 KB  (65536 × 4 B)
 | CCL | 两遍 Rosenfeld-Pfaltz + 并查集 + 路径压缩 | 代码量最小且可证明正确；最坏情况行为可分析 |
 | Hu 矩存储 | `sign(h)·log(|h|+ε)`，压缩为 Q16.16 | 原始 Hu 矩跨 10 个数量级；对数压缩保证马氏距离数值良态 |
 | 距离 | **平方**马氏距离；按类预置 Cholesky 逆 `L⁻¹`；distance = ‖L⁻¹(x−μ)‖² | 自动按类、按维度归一化；平方形式免 sqrt，并且是判定阈值最自然的 χ² 类统计量 |
-| Confidence | `min(fit_q8, sep_q8)`，两者分别刻画"离均值多近"与"与次近类拉开多远"（公式见 §6 `Detection` 定义） | 不允许单项撑高置信度；argmax 在 ACCEPTED 子集内进行（见 §5 最终选择策略） |
+| Confidence | 按 class_id 分三段定义（详见 §6 公式区）：<br>· ACCEPTED：`max(1, min(fit_q8, sep_q8))`（保证 ≥ 1）<br>· AMBIGUOUS：`min(fit_q8, sep_q8)`（可为 0）<br>· REJECTED：恒为 0（不走公式） | 避免定点舍入把 ACCEPTED 的 confidence 拉到 0（违反 §10.1 契约）；同时禁止一个"高 sep_q8" 的不可抓物得到非零置信；argmax 只在 ACCEPTED 子集进行（§5） |
 | AMBIGUOUS 阈值 `margin` | 每类在标定时独立推导，存于 `Template.margin` | margin 与 reject_thresh 是两个独立的判决量，需分别可调 |
 | 周长 | CCL 第二遍中顺带累加：前景像素若任一 4 邻域为背景则 +1 | 每像素多一次 4 向判定；不需要额外一遍图像扫描 |
 | 矩位宽 | 2 阶 / 3 阶中心矩用 `int64`；原始矩用 `int32` | 640×480 全帧矩形 μ₂₀ ≈ 1e10；Amax = 50000 px 时 |μ₃₀| 可达 ~4e10，`int32` 会静默回绕 |
@@ -296,14 +298,27 @@ static uint32_t g_uf_parent[MAX_LABELS + 1];  // 262.1 KB  (65536 × 4 B)
    请检查特征提取或训练样本"）。
 5. 做 Cholesky 分解：Σ_c = L Lᵀ，存下三角 L⁻¹（每类 55 个数，转为 Q16.16）。
 6. `reject_thresh_c` = （该类所有训练样本在类内**平方**马氏距离的最大值）
-   × 安全系数（默认 1.5）。单位：平方距离（Q16.16）。**永远不开平方根**。
+   × 安全系数（默认 1.5）。量化为 Q16.16 后存入 `Template[c].reject_thresh`。
+   单位：平方距离（Q16.16）。**永远不开平方根**。
+   **量化下界检查**：若实数值量化后 `< 1`（即 < 2⁻¹⁶ 平方距离），工具
+   **显式失败**并报告：`"class c 的 reject_thresh 量化为 0——类内
+   方差过小，可能是训练样本过少、样本完全一致、或 log-Hu 后数值塌陷；
+   请检查原始特征分布后再重标定"`。原因：若放行，运行时 L3 的
+   `d1² ≥ 0` 会把该类所有样本都判为 REJECTED。
 7. `margin_c` 推导（仅当 N_CLASSES ≥ 2）：
    `margin_c = α × min_{c'≠c} d²(μ_c, μ_{c'})`（在 c 的度量下），其中
    α = 0.25（默认，可按产线调）。这是 AMBIGUOUS 判别阈值：运行时若最近
    类和次近类的平方距离差小于 `margin_winner`，判为 AMBIGUOUS。每类单独
    存一份是必要的，因为 c 的 margin 反映"别人离 c 有多近"，不是对称量。
+   **量化下界检查**：若量化后 `< 1`（Q16.16），工具**显式失败**并报告：
+   `"class c 的 margin 量化为 0——最近邻类的均值与 c 太接近，AMBIGUOUS
+   判别会等价于除零；建议加特征或删类。第 8 步的可分性检查本应拦下
+   该问题，若同时触发则说明 reject_thresh 也过小"`。原因：若放行，
+   运行时 sep_q8 公式 `255 · (d2²−d1²) / m` 的分母为 0。
    **N_CLASSES = 1** 时单一类没有"别人"，`margin_0 = 0`；运行时凭"单类
-   特判：sep_q8 = 255，永不进入 AMBIGUOUS"回避（见 §6、§9.1）。
+   特判：sep_q8 = 255，永不进入 AMBIGUOUS"回避（见 §6、§9.1）。单类产线
+   的 `margin_0 = 0` 是合法的，不触发上述下界检查——下界检查只对
+   N_CLASSES ≥ 2 的 margin 生效。
 8. 可分性检查（仅当 N_CLASSES ≥ 2）：对每对类别 (c_i, c_j)，在 c_i 的度量下
    计算 μ_j 到 μ_i 的**平方**马氏距离（再反过来一次）。若任何一对满足
    `min(distance²) < 2 × max(reject_thresh_i, reject_thresh_j)`，工具
