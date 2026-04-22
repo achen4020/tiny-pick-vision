@@ -47,7 +47,9 @@
   这从 6σ 账面上彻底移除了一整类失效模式（无声地把粘连轮廓并为一个 blob）。
 - **每周期只抓一件**：模块在每帧中挑选置信度最高的一个目标。
 - 每帧物品数：1 ~ ~30。
-- 物品类别：**≤ 5 类已知**，对每条产线为固定值，编译期确定。
+- 物品类别：**1 ~ 5 类已知**，对每条产线为固定值，编译期确定。支持单类别
+  产线（N_CLASSES = 1），此时 AMBIGUOUS 判别退化失效（见 §6、§8、§9.1 的
+  单类别条款）。
 - 物品形状以**几何形为主**（规则或不规则多边形、带圆角的形状）。
 
 ### 3.2 光学
@@ -76,8 +78,11 @@
 
 ### 4.1 分层与尺寸预算
 
-每个模块都是**纯函数**；**无全局可变状态**；**无动态分配**；所有工作缓冲均
-为 `.bss` 中的固定大小数组。
+每个模块都是**纯函数**：相同入参 ⇒ 相同输出。**无堆分配**、**无跨帧隐式
+状态**——工作缓冲以固定大小 `.bss` 数组形式分配（详见 §6 末尾），每次
+`tpv_process_frame` 入口清零（§9.2 保证）后仅供当次帧内使用。从接口层面
+观察，这些 `.bss` 数组等价于栈上的临时空间，之所以放 `.bss` 是为了避免
+在 0.5 MB 量级的帧级缓冲上动用栈，而不是为了保留跨帧状态。
 
 ```
 ┌────────────────────────────────────────────────┐
@@ -149,9 +154,11 @@ void pose(const Blob *blob,
   带 pose 的 Blob[K]
      │
      ▼  classify — 对 K 个模板计算**平方**马氏距离；
-     │             REJECT   当 min_dist²          > reject_thresh (winner 的)
-     │             AMBIGUOUS 当 (dist²₂ − dist²₁) < margin        (winner 的)
-     │             ACCEPTED  当上述两条都不满足
+     │             REJECT   当 min_dist² ≥ Template[winner].reject_thresh
+     │             AMBIGUOUS 当 上一条不成立，且 N_CLASSES ≥ 2，且
+     │                        (dist²₂ − dist²₁) < Template[winner].margin
+     │             ACCEPTED  当上述两条都不成立
+     │             判决顺序严格 L3 先于 L3'，详见 §9.1
      │             同时按 §6 公式计算 confidence_q8
   Detection[K]
      │
@@ -219,13 +226,25 @@ typedef struct {
 } Detection;                 // 8 B
 
 // confidence_q8 的定义（运行时可直接算）：
-//   令 d1² = 最近类的平方马氏距离，d2² = 次近类的平方马氏距离（对比用）
-//       t   = Template[winner].reject_thresh，m = Template[winner].margin
-//   fit_q8   = clamp(⌊255 · (t − d1²) / t⌋, 0, 255)        // 越接近均值越高
-//   sep_q8   = clamp(⌊255 · (d2² − d1²) / m⌋, 0, 255)      // 与次近类的相对分离度
-//   confidence_q8 = min(fit_q8, sep_q8)                    // 取更差的一项，不允许单项撑高
-// 对 REJECTED（d1² > t）：fit_q8 = 0 → confidence_q8 = 0。
-// 对 AMBIGUOUS（d2² − d1² < m）：sep_q8 < 255 严格单调，sep_q8 = 0 表示两类完全重合。
+//   令 d1² = 最近类的平方马氏距离
+//       d2² = 次近类的平方马氏距离（仅 N_CLASSES ≥ 2 时有定义）
+//       t   = Template[winner].reject_thresh
+//       m   = Template[winner].margin（仅 N_CLASSES ≥ 2 时非零）
+//
+//   fit_q8 = clamp(⌊255 · (t − d1²) / t⌋, 0, 255)    // "离最近类均值多近"
+//
+//   sep_q8（N_CLASSES ≥ 2）= clamp(⌊255 · (d2² − d1²) / m⌋, 0, 255)
+//   sep_q8（N_CLASSES = 1）= 255（恒定：单类产线无"次近类"概念）
+//
+//   按 class_id 分三种情况定 confidence_q8：
+//     ACCEPTED  (class_id ∈ {0..4}) : max(1, min(fit_q8, sep_q8))  // 保证 ≥ 1
+//     AMBIGUOUS (0xFE)              : min(fit_q8, sep_q8)          // 可为 0
+//     REJECTED  (0xFF)              : 0（不走公式，直接置 0）
+//
+// 为什么 ACCEPTED 要 max(1, ...)：定点整除在 d1² 接近 reject_thresh 时会把
+// fit_q8 舍入到 0，但此时按 §9.1 判决顺序仍算 ACCEPTED，这会与 §10.1 语义表
+// "ACCEPTED ⇒ confidence_q8 ≥ 1"冲突。下界 1 用最小改动保住这一契约。
+// REJECTED 不经公式：避免一个"高 sep_q8"的不可抓物得到非零置信度。
 
 // .bss 工作缓冲，按 640×480 规格
 //
@@ -278,16 +297,19 @@ static uint32_t g_uf_parent[MAX_LABELS + 1];  // 262.1 KB  (65536 × 4 B)
 5. 做 Cholesky 分解：Σ_c = L Lᵀ，存下三角 L⁻¹（每类 55 个数，转为 Q16.16）。
 6. `reject_thresh_c` = （该类所有训练样本在类内**平方**马氏距离的最大值）
    × 安全系数（默认 1.5）。单位：平方距离（Q16.16）。**永远不开平方根**。
-7. `margin_c` = α × min_{c'≠c} d²(μ_c, μ_{c'})（在 c 的度量下），其中
+7. `margin_c` 推导（仅当 N_CLASSES ≥ 2）：
+   `margin_c = α × min_{c'≠c} d²(μ_c, μ_{c'})`（在 c 的度量下），其中
    α = 0.25（默认，可按产线调）。这是 AMBIGUOUS 判别阈值：运行时若最近
    类和次近类的平方距离差小于 `margin_winner`，判为 AMBIGUOUS。每类单独
    存一份是必要的，因为 c 的 margin 反映"别人离 c 有多近"，不是对称量。
-8. 可分性检查：对每对类别 (c_i, c_j)，在 c_i 的度量下计算 μ_j 到 μ_i 的
-   **平方**马氏距离（再反过来一次）。若任何一对满足
+   **N_CLASSES = 1** 时单一类没有"别人"，`margin_0 = 0`；运行时凭"单类
+   特判：sep_q8 = 255，永不进入 AMBIGUOUS"回避（见 §6、§9.1）。
+8. 可分性检查（仅当 N_CLASSES ≥ 2）：对每对类别 (c_i, c_j)，在 c_i 的度量下
+   计算 μ_j 到 μ_i 的**平方**马氏距离（再反过来一次）。若任何一对满足
    `min(distance²) < 2 × max(reject_thresh_i, reject_thresh_j)`，工具
    **显式失败**（"当前特征无法区分这些类别；请增改特征或调整品类组合"）。
    这一步是守门员，防止静默部署一个无法达到拒绝纪律的模型。全部比较均在
-   平方距离空间进行。
+   平方距离空间进行。N_CLASSES = 1 时跳过本步（没有类间距离可查）。
 9. 输出 `model_data.c`，其中只有一个 `const Template templates[N_CLASSES]`。
 
 嵌入式运行时与 PC 标定时**共享同一份特征提取代码**，是 6σ 可追溯性的基石。
@@ -302,12 +324,20 @@ static uint32_t g_uf_parent[MAX_LABELS + 1];  // 262.1 KB  (65536 × 4 B)
 | L1 预处理 | CCL 第一遍临时标号 ≥ MAX_LABELS | `SCENE_ERROR` |
 | L1 预处理 | 并查集收敛后 blob 数 ≥ MAX_BLOBS（硬顶 256，期望最大 ~30） | `SCENE_ERROR` |
 | L2 几何 | blob 面积 ∉ [Amin, Amax] | 静默丢弃该 blob |
-| L3 分类 | 最小**平方**马氏距离 > `Template[winner].reject_thresh` | `REJECTED (0xFF)` |
-| L3' 分类 | 上一条不成立，且 (dist²₂ − dist²₁) < `Template[winner].margin` | `AMBIGUOUS (0xFE)` |
+| L3 分类 | 最小**平方**马氏距离 ≥ `Template[winner].reject_thresh` | `REJECTED (0xFF)` |
+| L3' 分类 | 上一条不成立，且 N_CLASSES ≥ 2，且 (dist²₂ − dist²₁) < `Template[winner].margin` | `AMBIGUOUS (0xFE)` |
 
-分类层判决顺序严格为 **L3 先于 L3'**：若一个 blob 同时满足"离最近类太远"与
-"两最近类难分"，记为 `REJECTED`（而非 AMBIGUOUS），因为它连"落在某类内"
-都没做到，更细的歧义讨论没意义。
+两点重要约定：
+
+1. **判决顺序严格为 L3 先于 L3'**：若一个 blob 同时满足"离最近类太远"与
+   "两最近类难分"，记为 `REJECTED`（而非 AMBIGUOUS），因为它连"落在
+   某类内"都没做到，更细的歧义讨论没意义。
+2. **L3 边界是闭集**：用 `≥` 而不是 `>`，使得 d1² 恰等于 reject_thresh
+   的 blob 判为 `REJECTED`。这样 ACCEPTED ⇔ d1² < reject_thresh 严格
+   成立，配合 §6 的 `max(1, ...)` 保证 ACCEPTED 的 `confidence_q8 ≥ 1`，
+   与 §10.1 语义表一致。
+3. **N_CLASSES = 1 特判**：L3' 永远为假（不存在次近类），模块只会在
+   ACCEPTED / REJECTED 之间二分。sep_q8 在运行时恒为 255（见 §6）。
 
 ### 9.2 确定性保证
 
@@ -358,7 +388,7 @@ int tpv_process_frame(const uint8_t *y, int w, int h, Detection *det_out);
 
 | class_id | x, y | theta_x10 | confidence_q8 | 机械臂应当 |
 |---|---|---|---|---|
-| 0..4（ACCEPTED） | 选中 blob 的质心（供抓取） | 主轴角 × 10（供抓取） | > 0 | 按此位姿实施抓取 |
+| 0..4（ACCEPTED） | 选中 blob 的质心（供抓取） | 主轴角 × 10（供抓取） | ≥ 1（由 §6 的 `max(1, …)` 保证） | 按此位姿实施抓取 |
 | 0xFE（AMBIGUOUS） | "最接近某类的那个 blob"的质心（供操作员定位） | 计算得到但仅供参考，不用于抓取 | 反映决策分离度，典型值较低 | **禁止**抓取；告警 / 请求人工介入 |
 | 0xFF（REJECTED）  | 同上 | 同上 | 为 0（不满足 fit 条件） | **禁止**抓取；告警 / 请求人工介入 |
 
