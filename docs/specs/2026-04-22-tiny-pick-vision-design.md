@@ -112,8 +112,12 @@ int  ccl_moments(const uint8_t *bin, int w, int h,
 
 void shape_features(const Blob *blob, Features *features_out);
 
+// classify 除了决策与置信度之外，还必须把最近类的平方距离 d1² 回传，
+// 供上层在"全部被拒/歧义"时按 d1² 最小做兜底选择（见 §5 最终选择策略）。
 void classify(const Features *features, const Template *templates, int n_templates,
-              uint8_t *class_id_out, uint8_t *confidence_out);
+              uint8_t *class_id_out,   // 0..4 / 0xFE / 0xFF
+              uint8_t *confidence_out, // 0..255，公式见 §6
+              int32_t *d1_sq_out);     // 最近类的平方马氏距离（Q16.16）
 
 void pose(const Blob *blob,
           int16_t *x_out, int16_t *y_out, int16_t *theta_x10_out);
@@ -140,15 +144,26 @@ void pose(const Blob *blob,
      │                   μ3 沿主轴方向的符号
   Features[K]
      │
-     ▼  classify — 对 K 个模板计算**平方**马氏距离；
-     │             REJECT   当 min_dist²          > reject_thresh
-     │             AMBIGUOUS 当 (dist²₂ − dist²₁) < margin
-  (class_id, confidence)[K]
+     ▼  pose — 对每个 size-filter 存活的 blob 计算 (x, y, θ)
+     │         （pose 只依赖矩，先算好不花钱，也方便 REJECTED 帧操作员定位）
+  带 pose 的 Blob[K]
      │
-     ▼  pose （仅对接受类别计算）
+     ▼  classify — 对 K 个模板计算**平方**马氏距离；
+     │             REJECT   当 min_dist²          > reject_thresh (winner 的)
+     │             AMBIGUOUS 当 (dist²₂ − dist²₁) < margin        (winner 的)
+     │             ACCEPTED  当上述两条都不满足
+     │             同时按 §6 公式计算 confidence_q8
   Detection[K]
      │
-     ▼  按置信度取 argmax
+     ▼  最终选择（argmax 策略）：
+     │   1) 若存在任何 ACCEPTED（class_id ∈ {0..4}）：
+     │        在 ACCEPTED 之中按 confidence_q8 取 argmax → 返回 TPV_OK
+     │   2) 否则若存在 AMBIGUOUS/REJECTED：
+     │        在它们之中按 d1² 最小者（最接近某类的 blob）取胜 → 返回 TPV_OK，
+     │        class_id = 0xFE / 0xFF，(x, y) 供操作员定位
+     │   3) 否则：返回 TPV_EMPTY
+     │   关键：REJECTED/AMBIGUOUS 绝不参与 ACCEPTED 的 argmax，
+     │   高"置信"的拒绝永远压不过低"置信"的可抓物。
   单个 Detection → platform_glue → 机械臂控制器
 ```
 
@@ -157,36 +172,60 @@ void pose(const Blob *blob,
 全部固定大小；全部在 `.bss`。
 
 ```c
+// 字段顺序刻意把 int64 放在最前，避免 armv7a-linux-androideabi (AAPCS)
+// 下因 8 字节对齐而插入 4 字节 padding；否则 sizeof(Blob) 会是 88 而不是 80。
+// 下方 _Static_assert 锁住这一布局，任何误改都会在编译期失败。
 typedef struct {
-    int32_t m00, m10, m01;                    // 0~1 阶原始矩（Amax ≤ 50000 px 时 int32 够用）
-    int64_t mu20, mu11, mu02;                 // 2 阶中心矩（int64 — 见 §7 P2-2 原因）
-    int64_t mu30, mu21, mu12, mu03;           // 3 阶中心矩（int64 — 可能超过 1e10）
-    int32_t perimeter;                        // 4 邻域边界像素计数，CCL 第二遍顺带累加
-    int16_t bbox_x0, bbox_y0, bbox_x1, bbox_y1;
-} Blob;                                       // 12 + 24 + 32 + 4 + 8 = 80 B
+    int64_t mu20, mu11, mu02;                  // offset  0..23  2 阶中心矩（int64，见 §7 "矩位宽"行）
+    int64_t mu30, mu21, mu12, mu03;            // offset 24..55  3 阶中心矩（int64，最坏可达 ~4e10）
+    int32_t m00, m10, m01;                     // offset 56..67  0~1 阶原始矩（Amax ≤ 50000 px 时 int32 够用）
+    int32_t perimeter;                         // offset 68..71  4 邻域边界像素数，CCL 第二遍累加
+    int16_t bbox_x0, bbox_y0, bbox_x1, bbox_y1; // offset 72..79
+} Blob;                                        // 24 + 32 + 12 + 4 + 8 = 80 B（AAPCS 下无 padding，结构体 8 字节对齐）
+_Static_assert(sizeof(Blob) == 80, "Blob layout drift — fix field order");
 
-#define N_FEAT 10
+#define N_FEAT  10
+#define M3_EPS  /* Q16.16 */ 0x00001000  // 3 阶矩沿主轴投影的"接近零"阈值
+                                         // 绝对值低于此值即判定为对称 → sign=0
+
 typedef struct {
     int32_t hu[7];         // log|Hu_k|，Q16.16，带符号
     int32_t perim_ratio;   // 周长 / √面积，Q16.16
     int32_t eccentricity;  // Q16.16
-    int32_t m3_axis_sign;  // +1 或 −1（用 int32 存以保对齐）
+    int32_t m3_axis_sign;  // −1、0、+1（用 int32 存以保对齐）
+                           //   +1 / −1：μ₃ 在主轴方向的投影显著非零，可作 180° 消歧依据
+                           //       0：|投影| < M3_EPS，物品沿主轴对称，theta 只定义到 mod π
 } Features;                // 40 B
+// 注意：m3_axis_sign 是离散值但同在特征向量中参与马氏距离。若某类物品训练样本
+// 几乎全是 sign=0（纯对称），该维协方差会退化 → Cholesky 不可解。见 §8 第 4 步
+// 的协方差正则化。
 
 typedef struct {
     Features mean;
     int32_t  L_inv[N_FEAT*(N_FEAT+1)/2];  // 下三角 L⁻¹，Q16.16
     int32_t  reject_thresh;               // **平方**马氏距离，Q16.16
-} Template;                               // 40 + 55*4 + 4 = 264 B，×5 = 1.3 KB
+    int32_t  margin;                      // AMBIGUOUS 判别阈值（平方距离单位，Q16.16）
+                                          // 见 §8 第 7 步标定推导
+} Template;                               // 40 + 55*4 + 4 + 4 = 268 B，×5 ≈ 1.34 KB
 // 本规范全部距离默认为平方马氏距离，除非明确说明。
 // 运行时任何地方都不做 sqrt，比较始终在平方空间进行。
 
 typedef struct {
-    int16_t x, y;            // 质心，像素单位
-    int16_t theta_x10;       // θ×10，范围 −1800..1799
+    int16_t x, y;            // blob 质心（像素）；对 ACCEPTED/AMBIGUOUS/REJECTED 三种都是几何质心，
+                             // 始终有意义（见 §10.1 关于机械臂使用规则）
+    int16_t theta_x10;       // 主轴角 × 10，范围 −1800..1799；仅当 class_id ∈ {0..4} 可用于抓取
     uint8_t class_id;        // 0..4 合法；0xFE = AMBIGUOUS；0xFF = REJECTED
-    uint8_t confidence_q8;   // 0..255，越大越可靠
+    uint8_t confidence_q8;   // 0..255，值越大越可靠；定义见下
 } Detection;                 // 8 B
+
+// confidence_q8 的定义（运行时可直接算）：
+//   令 d1² = 最近类的平方马氏距离，d2² = 次近类的平方马氏距离（对比用）
+//       t   = Template[winner].reject_thresh，m = Template[winner].margin
+//   fit_q8   = clamp(⌊255 · (t − d1²) / t⌋, 0, 255)        // 越接近均值越高
+//   sep_q8   = clamp(⌊255 · (d2² − d1²) / m⌋, 0, 255)      // 与次近类的相对分离度
+//   confidence_q8 = min(fit_q8, sep_q8)                    // 取更差的一项，不允许单项撑高
+// 对 REJECTED（d1² > t）：fit_q8 = 0 → confidence_q8 = 0。
+// 对 AMBIGUOUS（d2² − d1² < m）：sep_q8 < 255 严格单调，sep_q8 = 0 表示两类完全重合。
 
 // .bss 工作缓冲，按 640×480 规格
 //
@@ -214,6 +253,8 @@ static uint32_t g_uf_parent[MAX_LABELS + 1];  // 262.1 KB  (65536 × 4 B)
 | CCL | 两遍 Rosenfeld-Pfaltz + 并查集 + 路径压缩 | 代码量最小且可证明正确；最坏情况行为可分析 |
 | Hu 矩存储 | `sign(h)·log(|h|+ε)`，压缩为 Q16.16 | 原始 Hu 矩跨 10 个数量级；对数压缩保证马氏距离数值良态 |
 | 距离 | **平方**马氏距离；按类预置 Cholesky 逆 `L⁻¹`；distance = ‖L⁻¹(x−μ)‖² | 自动按类、按维度归一化；平方形式免 sqrt，并且是判定阈值最自然的 χ² 类统计量 |
+| Confidence | `min(fit_q8, sep_q8)`，两者分别刻画"离均值多近"与"与次近类拉开多远"（公式见 §6 `Detection` 定义） | 不允许单项撑高置信度；argmax 在 ACCEPTED 子集内进行（见 §5 最终选择策略） |
+| AMBIGUOUS 阈值 `margin` | 每类在标定时独立推导，存于 `Template.margin` | margin 与 reject_thresh 是两个独立的判决量，需分别可调 |
 | 周长 | CCL 第二遍中顺带累加：前景像素若任一 4 邻域为背景则 +1 | 每像素多一次 4 向判定；不需要额外一遍图像扫描 |
 | 矩位宽 | 2 阶 / 3 阶中心矩用 `int64`；原始矩用 `int32` | 640×480 全帧矩形 μ₂₀ ≈ 1e10；Amax = 50000 px 时 |μ₃₀| 可达 ~4e10，`int32` 会静默回绕 |
 | 180° 消歧 | μ₃ 在主轴方向上的投影符号 | 对称物体自然退化为 0 → 不需要消歧，也正好是正确行为 |
@@ -228,16 +269,26 @@ static uint32_t g_uf_parent[MAX_LABELS + 1];  // 262.1 KB  (65536 × 4 B)
 1. 操作员将每类物品以不同角度摆放 30–50 次，通过同款相机采集帧。
 2. 工具对每帧跑 `threshold → ccl_moments → shape_features`。
 3. 对每类计算特征均值向量 μ_c 与协方差矩阵 Σ_c。
-4. 做 Cholesky 分解：Σ_c = L Lᵀ，存下三角 L⁻¹（每类 55 个浮点，转为 Q16.16）。
-5. `reject_thresh` = （该类所有训练样本的类内**平方**马氏距离最大值）
+4. **协方差正则化**：Σ_c ← Σ_c + ε·diag(σ²_ref)，其中
+   ε = 1e-4（默认），σ²_ref 是每维的"参考方差"（例如由训练样本的极差平方
+   推出）。这一步专门处理 `m3_axis_sign` 在纯对称类上退化为 0 方差、导致
+   Cholesky 失败的情况；同时吸收数值噪声，不改变健康类的分类行为。若
+   正则化之后 Σ_c 仍不正定，工具**显式失败**（"该类特征维度明显冗余，
+   请检查特征提取或训练样本"）。
+5. 做 Cholesky 分解：Σ_c = L Lᵀ，存下三角 L⁻¹（每类 55 个数，转为 Q16.16）。
+6. `reject_thresh_c` = （该类所有训练样本在类内**平方**马氏距离的最大值）
    × 安全系数（默认 1.5）。单位：平方距离（Q16.16）。**永远不开平方根**。
-6. 可分性检查：对每对类别 (c_i, c_j)，在 c_i 的度量下计算 μ_j 到 μ_i 的
+7. `margin_c` = α × min_{c'≠c} d²(μ_c, μ_{c'})（在 c 的度量下），其中
+   α = 0.25（默认，可按产线调）。这是 AMBIGUOUS 判别阈值：运行时若最近
+   类和次近类的平方距离差小于 `margin_winner`，判为 AMBIGUOUS。每类单独
+   存一份是必要的，因为 c 的 margin 反映"别人离 c 有多近"，不是对称量。
+8. 可分性检查：对每对类别 (c_i, c_j)，在 c_i 的度量下计算 μ_j 到 μ_i 的
    **平方**马氏距离（再反过来一次）。若任何一对满足
    `min(distance²) < 2 × max(reject_thresh_i, reject_thresh_j)`，工具
    **显式失败**（"当前特征无法区分这些类别；请增改特征或调整品类组合"）。
    这一步是守门员，防止静默部署一个无法达到拒绝纪律的模型。全部比较均在
    平方距离空间进行。
-7. 输出 `model_data.c`，其中只有一个 `const Template templates[N_CLASSES]`。
+9. 输出 `model_data.c`，其中只有一个 `const Template templates[N_CLASSES]`。
 
 嵌入式运行时与 PC 标定时**共享同一份特征提取代码**，是 6σ 可追溯性的基石。
 
@@ -251,8 +302,12 @@ static uint32_t g_uf_parent[MAX_LABELS + 1];  // 262.1 KB  (65536 × 4 B)
 | L1 预处理 | CCL 第一遍临时标号 ≥ MAX_LABELS | `SCENE_ERROR` |
 | L1 预处理 | 并查集收敛后 blob 数 ≥ MAX_BLOBS（硬顶 256，期望最大 ~30） | `SCENE_ERROR` |
 | L2 几何 | blob 面积 ∉ [Amin, Amax] | 静默丢弃该 blob |
-| L3 分类 | 最小**平方**马氏距离 > reject_thresh | `REJECTED (0xFF)` |
-| L3' 分类 | (dist²₂ − dist²₁) < margin（margin 单位为平方距离） | `AMBIGUOUS (0xFE)` |
+| L3 分类 | 最小**平方**马氏距离 > `Template[winner].reject_thresh` | `REJECTED (0xFF)` |
+| L3' 分类 | 上一条不成立，且 (dist²₂ − dist²₁) < `Template[winner].margin` | `AMBIGUOUS (0xFE)` |
+
+分类层判决顺序严格为 **L3 先于 L3'**：若一个 blob 同时满足"离最近类太远"与
+"两最近类难分"，记为 `REJECTED`（而非 AMBIGUOUS），因为它连"落在某类内"
+都没做到，更细的歧义讨论没意义。
 
 ### 9.2 确定性保证
 
@@ -299,6 +354,17 @@ int tpv_process_frame(const uint8_t *y, int w, int h, Detection *det_out);
 `EMPTY` 和 `SCENE_ERROR` **故意不进**`Detection.class_id`，以免场景级故障被
 误读为某个物体的"被拒绝"。它们是一等返回码，控制器必须显式处理。
 
+**TPV_OK 下三种 class_id 的 payload 语义**（严格约定，配合 §5 最终选择策略）：
+
+| class_id | x, y | theta_x10 | confidence_q8 | 机械臂应当 |
+|---|---|---|---|---|
+| 0..4（ACCEPTED） | 选中 blob 的质心（供抓取） | 主轴角 × 10（供抓取） | > 0 | 按此位姿实施抓取 |
+| 0xFE（AMBIGUOUS） | "最接近某类的那个 blob"的质心（供操作员定位） | 计算得到但仅供参考，不用于抓取 | 反映决策分离度，典型值较低 | **禁止**抓取；告警 / 请求人工介入 |
+| 0xFF（REJECTED）  | 同上 | 同上 | 为 0（不满足 fit 条件） | **禁止**抓取；告警 / 请求人工介入 |
+
+(x, y) 对三种情况都是几何质心，始终有物理意义；theta 对后两种计算后填入
+payload，但仅做操作员排障提示，机械臂逻辑不得据此下抓取动作。
+
 ### 10.2 输出 Payload（9 字节，传输层通用）
 
 ```
@@ -317,6 +383,10 @@ offset  bytes  字段
 场景级故障永远不渗入 class_id。
 
 当 `status != OK` 时，offset 1..8 全部填零，接收端必须忽略。
+
+当 `status == OK` 且 `class_id ∈ {0xFE, 0xFF}` 时，(x, y) 仍然是有意义的
+blob 质心（见 §10.1 语义表）。机械臂侧**不得**根据此时的 theta 下达抓取
+动作——这是由 class_id 而非 status 控制的业务规则。
 
 具体传输由 platform_glue 负责。串口二进制帧 / TCP JSON 包装器都十分简单，
 可由配置开关编译取舍；物理层通常在这 9 字节逻辑 payload 外再加自己的
@@ -345,7 +415,7 @@ offset  bytes  字段
 
 | 风险 | 概率 | 影响 | 缓解 |
 |---|---|---|---|
-| ≤5 类中有两类 Hu 特征难以区分 | 低 | 高（阻塞交付） | 标定工具的可分性检查（§8 第 6 步）直接拒绝出货；补特征（周长 / 面积 / 3 阶矩）|
+| ≤5 类中有两类 Hu 特征难以区分 | 低 | 高（阻塞交付） | 标定工具的可分性检查（§8 第 8 步）直接拒绝出货；补特征（周长 / 面积 / 3 阶矩）|
 | 背景板使用一段时间后有划痕 / 油污 | 中 | 中 | 定期重标定；L2 面积过滤吸收小噪声；暴露运行拒绝率指标给操作员 |
 | 相机 / 镜头更换 | 低 | 高 | 工作分辨率与俯视位固定；任何硬件变更都必须重标定 |
 | `g_labels` 614.4 KB 缓冲对某些板卡太大 | 低 | 中 | 必要时工作分辨率降到 320×240（小 4 倍），算法不变 |
