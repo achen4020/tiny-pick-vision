@@ -1,116 +1,108 @@
-# Tiny Pick Vision — Design Spec
+# Tiny Pick Vision — 设计规范
 
-Date: 2026-04-22
-Status: Draft (awaiting user review)
+日期：2026-04-22
+状态：草稿（待用户复核）
 
-## 1. Background
+## 1. 背景
 
-An industrial robotic arm needs to identify and locate objects on a work surface so
-it can pick them up. The vision code is an embedded C module running on the arm's
-controller board (a very low-end Android board). The controller takes the output
-`(class, x, y, θ, confidence)` and plans the pick.
+工业机械臂需要识别并定位放在工作面上的物品，以完成抓取动作。视觉模块是嵌入
+在机械臂控制器（一块极低端 Android 板卡）上运行的纯 C 代码。控制器读取
+本模块输出的 `(类别, x, y, θ, 置信度)` 后规划抓取。
 
-This document is the design for that vision module only. The robot-side motion
-planning, gripper control, and post-pick verification are out of scope.
+本文件**只覆盖视觉模块**。机械臂侧的运动规划、夹爪控制、抓取后复核均不在
+本规范范围内。
 
-## 2. Goals and Non-Goals
+## 2. 目标与非目标
 
-### Goals
+### 目标
 
-| # | Requirement | Target |
+| # | 需求 | 指标 |
 |---|---|---|
-| G1 | Binary size (stripped) | ≤ 20 KB |
-| G2 | Third-party dependencies | None (libc and NDK toolchain only) |
-| G3 | Target hardware | Worst case: 1-core ARMv7 @ ~800 MHz, 512 MB RAM |
-| G4 | Per-frame latency | ≤ 30 ms on target hardware |
-| G5 | End-to-end reliability | 6σ-capable *as part of a system* (see §7) |
-| G6 | Determinism | Same input bits → same output bits |
+| G1 | 二进制尺寸（strip 后） | ≤ 20 KB |
+| G2 | 第三方依赖 | 无（仅 libc 与 NDK 工具链） |
+| G3 | 目标硬件 | 最差：单核 ARMv7 @ ~800 MHz，512 MB RAM |
+| G4 | 每帧延迟 | 目标板上 ≤ 30 ms |
+| G5 | 端到端可靠性 | **系统级**达到 6σ 水平（见 §7） |
+| G6 | 确定性 | 输入 bit 相同 → 输出 bit 相同 |
 
-### Non-Goals
+### 非目标
 
-- Generic object detection on unknown classes.
-- Cluttered bin picking (stacked / occluded / 3D pose).
-- On-device training or online addition of new object classes.
-- Illumination robustness beyond the fixed work-cell lighting.
-- Color-based discrimination (operate on Y channel only).
+- 未知类别的通用物体检测。
+- 料框乱堆 / 堆叠 / 遮挡 / 3D 位姿识别。
+- 板端训练或在线增加新品类。
+- 超出工位固定光源之外的光照鲁棒性。
+- 基于色彩的区分（仅处理 Y 通道）。
 
-## 3. Scope and Assumptions
+## 3. 适用范围与前提
 
-All of the following are **hard preconditions** — if violated, the module may
-output `REJECTED` but is not required to be correct.
+下列全部为**硬性前提**——若被违反，本模块可能输出 `REJECTED`，但不保证
+结果正确。
 
-### 3.1 Scene
+### 3.1 场景
 
-- Objects lie flat on a **fixed-color background board** (e.g., black anti-static mat).
-- Objects **do not touch**, **do not stack**, and **do not overlap**. A minimum
-  inter-object gap (≥ 2 px at working resolution, i.e. ≥ ~1.5 mm for a typical
-  FOV) is enforced by the **upstream tooling / feeder / tray design**, not by
-  the vision module. The rationale is that a reliable physical gap is cheaper
-  and more provable than any blob-separation algorithm within the 20 KB
-  budget; it also removes an entire class of failure modes (silently merged
-  contours) from the 6σ accounting.
-- **One pick per cycle**: the module picks the single most-confident target per frame.
-- Object count per frame: 1 to ~30.
-- Object classes: **≤ 5 known classes**, fixed at compile time for a given production run.
-- Objects are **predominantly geometric** (regular or irregular polygons, rounded shapes).
+- 物品平放在**固定颜色的背景板**上（例如黑色防静电垫）。
+- 物品**互不接触**、**不堆叠**、**不重叠**。最小间距（工作分辨率下 ≥ 2 px，
+  典型 FOV 下 ≈ 1.5 mm）由**上料工装 / 送料机 / 料盘设计**保证，而非视觉
+  模块。理由是：在 20 KB 预算下，靠物理可证的间距远比算法分水岭更稳；同时
+  这从 6σ 账面上彻底移除了一整类失效模式（无声地把粘连轮廓并为一个 blob）。
+- **每周期只抓一件**：模块在每帧中挑选置信度最高的一个目标。
+- 每帧物品数：1 ~ ~30。
+- 物品类别：**≤ 5 类已知**，对每条产线为固定值，编译期确定。
+- 物品形状以**几何形为主**（规则或不规则多边形、带圆角的形状）。
 
-### 3.2 Optics
+### 3.2 光学
 
-- Camera is **eye-in-hand**, mounted on the arm's end-effector.
-- Before each detection cycle the arm moves to a **fixed overhead pose**, so
-  working distance and optical axis are constant per run.
-- Sensor: external USB/UVC camera, Y-channel accessible (YUV or grayscale).
-- Resolution: **640 × 480** working resolution. Higher-resolution cameras are
-  downsampled to this before processing.
-- Lighting: **fixed work-cell light source**, no direct sunlight, no ambient drift.
+- 相机是 **eye-in-hand**（装在机械臂末端）。
+- 每次检测周期开始前，机械臂走到**固定俯视位**，使工作距离和光轴对每条
+  产线恒定。
+- 传感器：外接 USB/UVC 相机，可直接取 Y 通道（YUV 或灰度）。
+- 分辨率：**工作分辨率 640 × 480**。高分辨率相机在入口处降采样到此。
+- 光照：**工位固定光源**，无直射阳光，无环境光漂移。
 
-### 3.3 Default Assumptions (subject to user validation)
+### 3.3 默认假设（待用户确认）
 
-These were proposed during brainstorming and are adopted as defaults. The user
-should validate them before implementation begins.
+下列为头脑风暴中提出、并作为默认值采纳。实施前应由用户校验。
 
-| Ref | Assumption |
+| 编号 | 假设 |
 |---|---|
-| A1 | 6σ is achieved at the **system level**: algorithm gives a confidence and can reject; the robot verifies with force / seating / re-imaging feedback after pick. The algorithm itself is not expected to be 6σ on its own. |
-| A2 | Cycle budget: **≤ 30 ms** for vision, leaving headroom for arm motion within a typical 100 ms/piece target. |
-| A3 | Calibration happens **offline on a PC** using the identical feature-extractor code. Templates are embedded as `const` data in the firmware. No field retraining. |
-| A4 | Output interface: single detection per frame as a compact binary frame over serial **or** JSON over TCP. Final choice deferred; both share the same payload schema. |
-| A5 | Working resolution is fixed at **640 × 480**. |
-| A6 | Toolchain: Android NDK `armv7a-linux-androideabi-clang`, `-Os -flto`, no RTTI, no exceptions, freestanding-friendly. |
+| A1 | 6σ 在**系统级**达成：算法给出置信度并可拒绝，机械臂侧在抓取后用力反馈 / 到位传感 / 二次成像复核。**算法本身不独立追求 6σ**。 |
+| A2 | 节拍预算：视觉侧 **≤ 30 ms**，为机械臂动作在典型 100 ms/件中留余量。 |
+| A3 | 标定在 **PC 端离线**进行，使用与运行时完全相同的特征提取代码；模板以 `const` 数据编译进固件；**不支持现场增加新品类**。 |
+| A4 | 输出接口：每帧一条检测结果，采用串口二进制帧 **或** TCP JSON；两者共用同一 payload 模式，最终二选一待定。 |
+| A5 | 工作分辨率固定为 **640 × 480**。 |
+| A6 | 工具链：Android NDK `armv7a-linux-androideabi-clang`，`-Os -flto`，关闭 RTTI 与异常，向 freestanding 友好。 |
 
-## 4. Architecture
+## 4. 架构
 
-### 4.1 Module Layering and Size Budget
+### 4.1 分层与尺寸预算
 
-Every module is a pure function. No global mutable state. No dynamic allocation.
-Every working buffer is a fixed-size `.bss` array.
+每个模块都是**纯函数**；**无全局可变状态**；**无动态分配**；所有工作缓冲均
+为 `.bss` 中的固定大小数组。
 
 ```
 ┌────────────────────────────────────────────────┐
-│ platform_glue.c     ~2 KB   Camera I/O, result │
-│                             output transport    │
+│ platform_glue.c     ~2 KB   相机 I/O、结果输出  │
 ├────────────────────────────────────────────────┤
-│ pipeline.c          ~1 KB   Per-frame scheduler │
+│ pipeline.c          ~1 KB   每帧调度            │
 ├────────────────────────────────────────────────┤
-│ threshold.c         ~0.5 KB Y → bitmap          │
-│ ccl_moments.c       ~3 KB   CCL + moment sums   │
-│ shape_features.c    ~1 KB   Moments → features  │
-│ classifier.c        ~1 KB   Mahalanobis + reject│
-│ pose.c              ~0.5 KB Pose + 180° disambig│
+│ threshold.c         ~0.5 KB Y 图 → 位图         │
+│ ccl_moments.c       ~3 KB   CCL + 矩累加        │
+│ shape_features.c    ~1 KB   矩 → 特征           │
+│ classifier.c        ~1 KB   马氏距离 + 拒绝     │
+│ pose.c              ~0.5 KB 位姿 + 180° 消歧    │
 ├────────────────────────────────────────────────┤
-│ model_data.c        ~1 KB   Template constants  │
+│ model_data.c        ~1 KB   模板常量            │
 └────────────────────────────────────────────────┘
-Subtotal:            ~10 KB
+小计：               ~10 KB
 ```
 
-After `-Os -flto -s` the expected footprint is ~8 KB of `.text` + ~1.3 KB
-`.rodata` (templates) = ~9.3 KB, leaving ~10 KB of headroom under the 20 KB cap.
+经 `-Os -flto -s` 后，预期 `.text` ≈ 8 KB、`.rodata`（模板）≈ 1.3 KB，
+合计 ≈ 9.3 KB，在 20 KB 上限下还有约 10 KB 余量。
 
-### 4.2 Inter-Module Contracts
+### 4.2 模块间契约
 
-Each contract is a single pure C function. No module reads or writes memory
-outside its declared outputs. This is what makes the system unit-testable and
-replaceable part-by-part.
+每个契约就是一个纯 C 函数。任一模块**不读不写**自己声明输出之外的内存。
+正是这点让每个模块都能独立单测、也能整体替换。
 
 ```c
 void threshold(const uint8_t *y, int w, int h, uint8_t *bin_out);
@@ -127,84 +119,83 @@ void pose(const Blob *blob,
           int16_t *x_out, int16_t *y_out, int16_t *theta_x10_out);
 ```
 
-## 5. Per-Frame Data Flow
+## 5. 单帧数据流
 
 ```
-  Y buffer (640×480, uint8)
+  Y 图 (640×480, uint8)
      │
-     ▼  threshold  — single pass, 8 px per int32 op
-  bitmap (38.4 KB)
+     ▼  threshold  — 单次扫描，一次处理 8 px（int32 位并行）
+  位图 (38.4 KB)
      │
-     ▼  ccl_moments  — two-pass Rosenfeld-Pfaltz + union-find;
-     │                 accumulates m00, m10, m01, μ20, μ11, μ02,
-     │                 μ30, μ21, μ12, μ03, perimeter (4-neighbour),
-     │                 and bbox per label
+     ▼  ccl_moments  — 两遍 Rosenfeld-Pfaltz + 并查集；
+     │                 每个标号累加 m00, m10, m01, μ20, μ11, μ02,
+     │                 μ30, μ21, μ12, μ03, perimeter（4 邻域）,
+     │                 以及 bbox
   Blob[N]
      │
-     ▼  size filter:  Amin ≤ m00 ≤ Amax (both compile-time constants)
-  valid Blob[K]
+     ▼  尺寸过滤：Amin ≤ m00 ≤ Amax（均为编译期常量）
+  有效 Blob[K]
      │
-     ▼  shape_features  — log|Hu[0..6]|, perim/√area, eccentricity,
-     │                    μ3-along-principal-axis sign
+     ▼  shape_features — log|Hu[0..6]|, perim/√area, eccentricity,
+     │                   μ3 沿主轴方向的符号
   Features[K]
      │
-     ▼  classify  — **squared** Mahalanobis distance against K templates;
-     │              REJECT   if min_dist²             > reject_thresh
-     │              AMBIGUOUS if (dist²₂ − dist²₁)     < margin
+     ▼  classify — 对 K 个模板计算**平方**马氏距离；
+     │             REJECT   当 min_dist²          > reject_thresh
+     │             AMBIGUOUS 当 (dist²₂ − dist²₁) < margin
   (class_id, confidence)[K]
      │
-     ▼  pose  (accepted blobs only)
+     ▼  pose （仅对接受类别计算）
   Detection[K]
      │
-     ▼  argmax by confidence
-  single Detection → platform_glue → robot controller
+     ▼  按置信度取 argmax
+  单个 Detection → platform_glue → 机械臂控制器
 ```
 
-## 6. Data Structures
+## 6. 数据结构
 
-All fixed-size; all `.bss`.
+全部固定大小；全部在 `.bss`。
 
 ```c
 typedef struct {
-    int32_t m00, m10, m01;                    // raw moments 0–1 (int32 safe for Amax ≤ 50000 px)
-    int64_t mu20, mu11, mu02;                 // central 2nd  (int64 — see P2-2 rationale in §7)
-    int64_t mu30, mu21, mu12, mu03;           // central 3rd  (int64 — can exceed 1e10)
-    int32_t perimeter;                        // 4-neighbour boundary-pixel count, accumulated in CCL pass 2
+    int32_t m00, m10, m01;                    // 0~1 阶原始矩（Amax ≤ 50000 px 时 int32 够用）
+    int64_t mu20, mu11, mu02;                 // 2 阶中心矩（int64 — 见 §7 P2-2 原因）
+    int64_t mu30, mu21, mu12, mu03;           // 3 阶中心矩（int64 — 可能超过 1e10）
+    int32_t perimeter;                        // 4 邻域边界像素计数，CCL 第二遍顺带累加
     int16_t bbox_x0, bbox_y0, bbox_x1, bbox_y1;
 } Blob;                                       // 12 + 24 + 32 + 4 + 8 = 80 B
 
 #define N_FEAT 10
 typedef struct {
-    int32_t hu[7];         // log|Hu_k|, Q16.16, signed
-    int32_t perim_ratio;   // perimeter / sqrt(area), Q16.16
+    int32_t hu[7];         // log|Hu_k|，Q16.16，带符号
+    int32_t perim_ratio;   // 周长 / √面积，Q16.16
     int32_t eccentricity;  // Q16.16
-    int32_t m3_axis_sign;  // +1 or -1 (stored as int32 for alignment)
+    int32_t m3_axis_sign;  // +1 或 −1（用 int32 存以保对齐）
 } Features;                // 40 B
 
 typedef struct {
     Features mean;
-    int32_t  L_inv[N_FEAT*(N_FEAT+1)/2];  // inverse Cholesky lower-tri, Q16.16
-    int32_t  reject_thresh;               // **squared** Mahalanobis distance, Q16.16
-} Template;                               // 40 + 55*4 + 4 = 264 B, ×5 = 1.3 KB
-// All distances in this spec are squared Mahalanobis unless explicitly noted.
-// Runtime never computes sqrt — comparisons happen in squared space.
+    int32_t  L_inv[N_FEAT*(N_FEAT+1)/2];  // 下三角 L⁻¹，Q16.16
+    int32_t  reject_thresh;               // **平方**马氏距离，Q16.16
+} Template;                               // 40 + 55*4 + 4 = 264 B，×5 = 1.3 KB
+// 本规范全部距离默认为平方马氏距离，除非明确说明。
+// 运行时任何地方都不做 sqrt，比较始终在平方空间进行。
 
 typedef struct {
-    int16_t x, y;            // centroid, pixel units
-    int16_t theta_x10;       // θ×10, range −1800..1799
-    uint8_t class_id;        // 0..4 valid; 0xFE = AMBIGUOUS; 0xFF = REJECTED
-    uint8_t confidence_q8;   // 0..255, higher is better
+    int16_t x, y;            // 质心，像素单位
+    int16_t theta_x10;       // θ×10，范围 −1800..1799
+    uint8_t class_id;        // 0..4 合法；0xFE = AMBIGUOUS；0xFF = REJECTED
+    uint8_t confidence_q8;   // 0..255，越大越可靠
 } Detection;                 // 8 B
 
-// .bss working buffers, sized for 640×480
+// .bss 工作缓冲，按 640×480 规格
 //
-// Two independent caps:
-//   MAX_LABELS — worst-case raw label count from CCL pass 1 (noise-driven;
-//                matches uint16 label space).
-//   MAX_BLOBS  — post-union unique blobs actually surfaced to higher layers
-//                (expected ≤ ~30; 256 provides an ample safety margin).
-// Either cap saturating triggers TPV_SCENE_ERROR, guaranteed before any
-// buffer overrun.
+// 两个独立的容量上限：
+//   MAX_LABELS —— CCL 第一遍扫描期间临时标号数的最坏上限
+//                 （受噪声驱动；匹配 uint16 标号空间）。
+//   MAX_BLOBS  —— 并查集收敛后、真正暴露给上层的唯一 blob 数
+//                 （预期 ≤ ~30；256 提供充足安全余量）。
+// 任一上限逼近即触发 TPV_SCENE_ERROR，确保在任何缓冲越界前停下。
 #define MAX_LABELS 65535
 #define MAX_BLOBS  256
 
@@ -212,188 +203,168 @@ static uint8_t  g_bin[640*480/8];             //  38.4 KB
 static uint16_t g_labels[640*480];            // 614.4 KB
 static Blob     g_blobs[MAX_BLOBS];           //  20.0 KB  (256 × 80 B)
 static uint32_t g_uf_parent[MAX_LABELS + 1];  // 262.1 KB  (65536 × 4 B)
-// Total working set ≈ 935 KB, well under the 512 MB RAM budget.
+// 工作集合计 ≈ 935 KB，远低于 512 MB 内存预算。
 ```
 
-## 7. Key Algorithm Decisions
+## 7. 关键算法决策
 
-| Area | Decision | Rationale |
+| 方面 | 决策 | 理由 |
 |---|---|---|
-| Numeric type | `int32` fixed-point (Q16.16) for features, templates, and distances; `int64` for 2nd/3rd moment accumulators only (see "Moment bit-widths" row) | Deterministic, no FPU dependency, bit-reproducible across builds |
-| CCL | Two-pass Rosenfeld-Pfaltz with union-find + path compression | Smallest code that is provably correct; worst-case behavior analyzable |
-| Hu moment storage | `sign(h) * log(|h|+ε)` compressed to Q16.16 | Raw Hu moments span 10+ orders of magnitude; log compression keeps Mahalanobis numerically well-conditioned |
-| Distance | **Squared** Mahalanobis; inverse Cholesky `L⁻¹` baked in per class; distance = ‖L⁻¹(x−μ)‖² | Per-class, per-dimension scaling automatic; squared form avoids any sqrt and is the natural χ²-like statistic for rejection thresholds |
-| Perimeter | Accumulated in CCL pass 2: a foreground pixel contributes +1 if any 4-neighbour is background | One extra 4-way compare per pixel; no second image pass |
-| Moment bit-widths | 2nd and 3rd central moments stored as `int64`; raw moments as `int32` | At 640×480 with a 307200-px blob, μ₂₀ ≈ 1e10; at Amax = 50000 px, |μ₃₀| can reach ~4e10. `int32` would silently wrap |
-| 180° disambiguation | Sign of μ₃ projected onto the principal axis | Symmetric objects degenerate to zero → no disambiguation needed, which is correct |
-| Threshold | Static, set once by calibration tool | Fixed lighting removes need for Otsu/adaptive; saves code |
-| Rotation handling | Invariants only — no rotated templates stored | Keeps template table tiny and match cost O(K) |
+| 数值类型 | 特征 / 模板 / 距离用 `int32` 定点（Q16.16）；仅 2 阶 / 3 阶矩累加器用 `int64`（见下"矩位宽"行） | 确定性、无 FPU 依赖、跨编译器位级可复现 |
+| CCL | 两遍 Rosenfeld-Pfaltz + 并查集 + 路径压缩 | 代码量最小且可证明正确；最坏情况行为可分析 |
+| Hu 矩存储 | `sign(h)·log(|h|+ε)`，压缩为 Q16.16 | 原始 Hu 矩跨 10 个数量级；对数压缩保证马氏距离数值良态 |
+| 距离 | **平方**马氏距离；按类预置 Cholesky 逆 `L⁻¹`；distance = ‖L⁻¹(x−μ)‖² | 自动按类、按维度归一化；平方形式免 sqrt，并且是判定阈值最自然的 χ² 类统计量 |
+| 周长 | CCL 第二遍中顺带累加：前景像素若任一 4 邻域为背景则 +1 | 每像素多一次 4 向判定；不需要额外一遍图像扫描 |
+| 矩位宽 | 2 阶 / 3 阶中心矩用 `int64`；原始矩用 `int32` | 640×480 全帧矩形 μ₂₀ ≈ 1e10；Amax = 50000 px 时 |μ₃₀| 可达 ~4e10，`int32` 会静默回绕 |
+| 180° 消歧 | μ₃ 在主轴方向上的投影符号 | 对称物体自然退化为 0 → 不需要消歧，也正好是正确行为 |
+| 二值化阈值 | 标定一次后静态烧入 | 固定光照场景不需要 Otsu / 自适应，省代码 |
+| 旋转处理 | 仅用旋转不变特征，不存旋转模板 | 模板表极小、匹配代价 O(K) |
 
-## 8. Calibration (Offline, PC)
+## 8. 标定流程（PC 端离线）
 
-A separate PC tool, built from the **same C source** for the feature extractor,
-produces `model_data.c`. Steps:
+一个独立的 PC 工具，使用**与嵌入式端同一份 C 源码**的特征提取器，产出
+`model_data.c`。步骤：
 
-1. Operator places each object class 30–50 times at varied angles and captures
-   frames via the same camera.
-2. Tool runs `threshold → ccl_moments → shape_features` on each frame.
-3. Per class, compute mean feature vector μ_c and covariance Σ_c.
-4. Compute Cholesky factor L such that Σ_c = L Lᵀ, store L⁻¹ (lower-tri, 55 floats
-   per class, converted to Q16.16).
-5. `reject_thresh` = (max intra-class **squared** Mahalanobis distance observed
-   across all training samples of that class) × safety_factor (default 1.5).
-   Units: squared-distance (Q16.16). No sqrt is ever applied.
-6. Separability check: for every pair of classes (c_i, c_j) compute the
-   **squared** Mahalanobis distance of μ_j under c_i's metric (and vice
-   versa). If `min(distance²) < 2 × max(reject_thresh_i, reject_thresh_j)`
-   for any pair, the tool **fails loudly** ("classes not separable with
-   current features; add/change features or change product mix"). This is
-   the gatekeeper that prevents silently deploying a model that cannot meet
-   the reject discipline. All comparisons are in squared-distance space.
-7. Emit `model_data.c` as a single `const Template templates[N_CLASSES]`.
+1. 操作员将每类物品以不同角度摆放 30–50 次，通过同款相机采集帧。
+2. 工具对每帧跑 `threshold → ccl_moments → shape_features`。
+3. 对每类计算特征均值向量 μ_c 与协方差矩阵 Σ_c。
+4. 做 Cholesky 分解：Σ_c = L Lᵀ，存下三角 L⁻¹（每类 55 个浮点，转为 Q16.16）。
+5. `reject_thresh` = （该类所有训练样本的类内**平方**马氏距离最大值）
+   × 安全系数（默认 1.5）。单位：平方距离（Q16.16）。**永远不开平方根**。
+6. 可分性检查：对每对类别 (c_i, c_j)，在 c_i 的度量下计算 μ_j 到 μ_i 的
+   **平方**马氏距离（再反过来一次）。若任何一对满足
+   `min(distance²) < 2 × max(reject_thresh_i, reject_thresh_j)`，工具
+   **显式失败**（"当前特征无法区分这些类别；请增改特征或调整品类组合"）。
+   这一步是守门员，防止静默部署一个无法达到拒绝纪律的模型。全部比较均在
+   平方距离空间进行。
+7. 输出 `model_data.c`，其中只有一个 `const Template templates[N_CLASSES]`。
 
-The tool and the runtime share the feature extractor so calibration-time and
-runtime features are guaranteed identical.
+嵌入式运行时与 PC 标定时**共享同一份特征提取代码**，是 6σ 可追溯性的基石。
 
-## 9. Error Handling and 6σ Rejection Strategy
+## 9. 错误处理与 6σ 拒绝策略
 
-### 9.1 Rejection Ladder
+### 9.1 拒绝阶梯
 
-| Layer | Check | Output |
+| 层级 | 条件 | 输出 |
 |---|---|---|
-| L1 pre | No blob survives geometric filter | `EMPTY` |
-| L1 pre | Raw label count ≥ MAX_LABELS during CCL pass 1 | `SCENE_ERROR` |
-| L1 pre | Unique blob count ≥ MAX_BLOBS after union (hard cap 256, expected max ~30) | `SCENE_ERROR` |
-| L2 geom | Blob area ∉ [Amin, Amax] | Drop blob silently |
-| L3 class | min **squared** Mahalanobis distance > reject_thresh | `REJECTED (0xFF)` |
-| L3' class | (dist²₂ − dist²₁) < margin (margin in squared-distance units) | `AMBIGUOUS (0xFE)` |
+| L1 预处理 | 几何过滤后一个有效 blob 都没有 | `EMPTY` |
+| L1 预处理 | CCL 第一遍临时标号 ≥ MAX_LABELS | `SCENE_ERROR` |
+| L1 预处理 | 并查集收敛后 blob 数 ≥ MAX_BLOBS（硬顶 256，期望最大 ~30） | `SCENE_ERROR` |
+| L2 几何 | blob 面积 ∉ [Amin, Amax] | 静默丢弃该 blob |
+| L3 分类 | 最小**平方**马氏距离 > reject_thresh | `REJECTED (0xFF)` |
+| L3' 分类 | (dist²₂ − dist²₁) < margin（margin 单位为平方距离） | `AMBIGUOUS (0xFE)` |
 
-### 9.2 Determinism Guarantees
+### 9.2 确定性保证
 
-- No floating-point arithmetic.
-- No time, random, or thread-local state.
-- All buffers zeroed on entry to `process_frame`.
-- CCL label assignment order is purely a function of scan order, hence of input.
+- 无浮点运算。
+- 无时间、随机、线程局部状态。
+- `process_frame` 入口处所有缓冲清零。
+- CCL 标号分配顺序完全由扫描顺序决定，即完全由输入决定。
 
-These guarantees let the team run **bit-identical replay** on any recorded frame,
-which is essential for incident analysis and regression testing.
+这些保证让团队能对任一录制的帧做**位级复现**，这是事故分析和回归测试的前提。
 
-### 9.3 Traceability
+### 9.3 可观测性
 
-Compile-time `DEBUG_TRACE` macro enables structured logs:
+编译期宏 `DEBUG_TRACE` 打开结构化日志：
 
-- Each detected blob: `{blob_id, bbox, features, top-3 distances, decision}`.
-- Stripped from release builds — zero runtime cost.
+- 每个检出 blob：`{blob_id, bbox, features, top-3 distances, decision}`。
+- Release 构建中完全剥离，运行时零开销。
 
-### 9.4 Why the Algorithm Does Not Aim for 6σ on Its Own
+### 9.4 算法为什么不自追求 6σ
 
-Achieving 3.4 DPMO from a single-shot vision call is unrealistic and, worse,
-unmeasurable (you cannot reliably validate 3.4 DPMO from a feasible sample
-size). The design explicitly leaves the remaining sigmas to:
+单次视觉调用本身达到 3.4 DPMO 既不现实，也更糟——**无法在可行样本量下验证**。
+本设计明确把剩余 sigma 留给：
 
-- **Reject-rather-than-guess** at the algorithm layer (keeps false-accepts low).
-- **Post-pick verification** at the robot layer (force sensing, gripper
-  encoder position, optional re-imaging, weight station).
-- **Operator escalation** when the rejection rate exceeds a running threshold.
+- **算法层拒绝而非猜测**（把误接受率压低）。
+- **机械臂层抓取后复核**（力反馈、夹爪编码器位置、可选二次成像、称重工位）。
+- **运行统计拒绝率超过阈值时的人工介入**。
 
-This follows standard practice on industrial lines and is the only
-architecturally honest way to hit 6σ.
+这是工业线的标准做法，也是唯一在架构上诚实的 6σ 达成路径。
 
-## 10. Interfaces
+## 10. 接口
 
-### 10.1 Runtime Entry Point
+### 10.1 运行时入口
 
 ```c
-// Return codes:
-//   TPV_OK           (0)  → det_out populated; class_id carries the decision
-//                            (0..4 valid, 0xFE AMBIGUOUS, 0xFF REJECTED).
-//   TPV_EMPTY        (1)  → no blob passed the geometric filter; det_out zeroed.
-//   TPV_SCENE_ERROR  (2)  → CCL exceeded MAX_LABELS (pass-1 raw-label overflow)
-//                            OR post-union blob count exceeded MAX_BLOBS;
-//                            det_out zeroed.
-//   TPV_BAD_INPUT    (-1) → w/h mismatch with compile-time WxH or null pointer.
+// 返回码：
+//   TPV_OK           (0)  → det_out 有效；class_id 携带决策
+//                            （0..4 合法；0xFE AMBIGUOUS；0xFF REJECTED）
+//   TPV_EMPTY        (1)  → 无 blob 通过几何过滤；det_out 清零
+//   TPV_SCENE_ERROR  (2)  → CCL 临时标号溢出（> MAX_LABELS），
+//                            或并查集后 blob 数超过 MAX_BLOBS；det_out 清零
+//   TPV_BAD_INPUT    (-1) → w/h 与编译期 WxH 不一致，或指针为空
 int tpv_process_frame(const uint8_t *y, int w, int h, Detection *det_out);
 ```
 
-`EMPTY` and `SCENE_ERROR` are intentionally *not* encoded inside `Detection.class_id`
-so that scene-level faults cannot be mistaken for per-object rejections; they are
-first-class return codes that the controller must handle explicitly.
+`EMPTY` 和 `SCENE_ERROR` **故意不进**`Detection.class_id`，以免场景级故障被
+误读为某个物体的"被拒绝"。它们是一等返回码，控制器必须显式处理。
 
-### 10.2 Output Payload (9 bytes, identical for all transports)
+### 10.2 输出 Payload（9 字节，传输层通用）
 
 ```
-offset  bytes  field
+offset  bytes  字段
   0      1    status     0=OK, 1=EMPTY, 2=SCENE_ERROR, 3=BAD_INPUT
-  1      2    x          little-endian int16, pixels   (valid iff status==OK)
-  3      2    y          little-endian int16, pixels   (valid iff status==OK)
-  5      2    theta_x10  little-endian int16, deg × 10 (valid iff status==OK)
-  7      1    class_id   0..4 normal; 0xFE AMBIGUOUS; 0xFF REJECTED (valid iff status==OK)
-  8      1    confidence 0..255                         (valid iff status==OK)
+  1      2    x          小端 int16，像素   （仅 status==OK 有效）
+  3      2    y          小端 int16，像素   （仅 status==OK 有效）
+  5      2    theta_x10  小端 int16，度 ×10（仅 status==OK 有效）
+  7      1    class_id   0..4 正常；0xFE AMBIGUOUS；0xFF REJECTED（仅 status==OK 有效）
+  8      1    confidence 0..255            （仅 status==OK 有效）
 ```
 
-The leading `status` byte mirrors the `tpv_process_frame` return code, so the
-receiving controller can distinguish **"no pickable object in scene"**
-(`status=EMPTY`) from **"vision subsystem silent"** (no frame received at all,
-visible only at the transport layer via timeout). `class_id` is deliberately
-reserved for *per-object* decisions only; scene-level faults never leak into
-it.
+首字节 `status` 与 `tpv_process_frame` 的返回码一一对应。这样接收端能区分
+**"场景中暂时无可抓物"**（`status=EMPTY`）和**"视觉子系统失联"**（根本未
+收到帧，由传输层通过超时才能察觉）。`class_id` 严格只承担**单物体级**决策，
+场景级故障永远不渗入 class_id。
 
-When `status != OK`, offsets 1..8 are zero-filled and must be ignored by the
-receiver.
+当 `status != OK` 时，offset 1..8 全部填零，接收端必须忽略。
 
-Transport is platform-glue's responsibility. Serial and TCP/JSON wrappers are
-both trivial and can be compiled in or out with a config flag; they are
-expected to add their own framing (e.g., STX/length/CRC) around this 9-byte
-logical payload as appropriate for the physical link.
+具体传输由 platform_glue 负责。串口二进制帧 / TCP JSON 包装器都十分简单，
+可由配置开关编译取舍；物理层通常在这 9 字节逻辑 payload 外再加自己的
+帧同步（例如 STX / 长度 / CRC）。
 
-### 10.3 Calibration Tool I/O
+### 10.3 标定工具 I/O
 
 ```
-Input:  N_CLASSES * M frames of raw Y @ 640×480
-Output: model_data.c containing `const Template templates[N_CLASSES]`
-        report.txt with per-class separability metrics
+输入：N_CLASSES × M 帧 640×480 原始 Y 图
+输出：model_data.c，内含 `const Template templates[N_CLASSES]`
+      report.txt，包含每类可分性指标
 ```
 
-## 11. Testing Strategy
+## 11. 测试策略
 
-| Layer | Method | Pass Criterion |
+| 层级 | 手段 | 通过标准 |
 |---|---|---|
-| Unit | Per-module golden-data tests on PC | 100% branch coverage |
-| Property | Rotate/translate input; verify (x,y,θ) transform correctly | <1 px / <0.5° error |
-| Synthetic | Procedurally generated templates with added Gaussian + salt-pepper noise | Classify rate >99.9% at expected SNR |
-| Regression | 10k recorded production frames replayed | Zero decision change vs. golden baseline per release |
-| Target | Cross-compile to ARM; time on real board | ≤30 ms/frame @ 640×480, p99 |
-| Long-stability | ≥100k frames from line | FAR, FRR measured; reject rate and miss rate within spec |
+| 单元 | PC 端每模块金标数据对比 | 100% 分支覆盖 |
+| 属性 | 对输入做纯平移 / 纯旋转，验证 (x, y, θ) 输出变化符合预期 | <1 px / <0.5° 误差 |
+| 合成 | 程序生成旋转模板，注入高斯 + 椒盐噪声 | 预期信噪比下分类率 >99.9% |
+| 回归 | 回放 10k 条生产帧 | 每版与金标基线决策零差异 |
+| 目标机 | 交叉编译到 ARM，在真实板卡计时 | p99 ≤ 30 ms/帧 @ 640×480 |
+| 长稳 | 产线连续 ≥100k 帧 | 实测 FAR / FRR；拒绝率 / 漏抓率落在规格内 |
 
-## 12. Risks
+## 12. 风险
 
-| Risk | Likelihood | Impact | Mitigation |
+| 风险 | 概率 | 影响 | 缓解 |
 |---|---|---|---|
-| Two of the ≤5 classes have indistinguishable Hu features | Low | High (blocks product) | Calibration tool's separability check (§8 step 6) refuses to ship; add perimeter/area or 3rd-moment feature |
-| Background board gets scuffed/dirty over time | Medium | Medium | Periodic re-calibration; L2 area filter absorbs small noise; add operator-visible reject-rate metric |
-| Camera replaced with different optics | Low | High | Working resolution and overhead pose are fixed; recalibrate on any hardware change |
-| 614.4 KB `g_labels` buffer is too large for some boards | Low | Medium | If needed, reduce working resolution to 320×240 (4× smaller) with no algorithm change |
-| Production introduces a 6th class | — | — | Out of scope by A3; requires firmware rebuild |
+| ≤5 类中有两类 Hu 特征难以区分 | 低 | 高（阻塞交付） | 标定工具的可分性检查（§8 第 6 步）直接拒绝出货；补特征（周长 / 面积 / 3 阶矩）|
+| 背景板使用一段时间后有划痕 / 油污 | 中 | 中 | 定期重标定；L2 面积过滤吸收小噪声；暴露运行拒绝率指标给操作员 |
+| 相机 / 镜头更换 | 低 | 高 | 工作分辨率与俯视位固定；任何硬件变更都必须重标定 |
+| `g_labels` 614.4 KB 缓冲对某些板卡太大 | 低 | 中 | 必要时工作分辨率降到 320×240（小 4 倍），算法不变 |
+| 产线新增第 6 类 | — | — | 超出 A3 范围；必须重新编译固件 |
 
-## 13. Open Questions
+## 13. 开放问题
 
-Before implementation, the following from §3.3 require user confirmation or refinement:
+下列条目来自 §3.3，实施前需用户拍板或细化：
 
-1. **A1 (6σ strategy)**: confirm that post-pick verification exists on the robot side.
-2. **A2 (latency budget)**: is 30 ms the right target, or is the cycle budget
-   tighter / looser?
-3. **A4 (output transport)**: pick one — serial binary, or TCP/JSON, or both.
-4. **Object count upper bound**: expected per-frame max is ~30. `MAX_BLOBS`
-   is set to 256 as a defensive hard cap after CCL union; `MAX_LABELS` is
-   65535 for raw labels during CCL pass 1 (noise tolerance). Confirm 256
-   unique-blobs is comfortable (scene never legitimately reaches it);
-   otherwise lower it so overflow triggers `SCENE_ERROR` earlier.
-5. **Calibration UX**: does the PC tool need a GUI for operators, or is a CLI
-   plus existing capture tooling sufficient?
+1. **A1（6σ 策略）**：确认机械臂侧确有抓取后复核机制。
+2. **A2（节拍）**：30 ms 是合适值，还是节拍更紧 / 更松？
+3. **A4（输出传输）**：二选一——串口二进制，或 TCP/JSON。
+4. **blob 数量上限**：预期每帧最大 ~30。`MAX_BLOBS` 设为 256 作为并查集后
+   的防御性硬顶；`MAX_LABELS` 设为 65535 用于吸收 CCL 第一遍的噪声标号。
+   请确认 256 这个上限足够宽松（正常场景绝不会触及）；如果偏保守，可下调
+   以便更早触发 `SCENE_ERROR`。
+5. **标定 UX**：PC 端工具要不要给操作员做 GUI，还是 CLI + 现有采集工具就够？
 
-## 14. Transition to Implementation
+## 14. 过渡到实施
 
-Once this spec is approved, the next step is a detailed **implementation plan**
-produced by the writing-plans skill. That plan will decompose each module into
-concrete tasks with test checkpoints, in an order that keeps every intermediate
-commit runnable and verifiable.
+本规范通过后，下一步由 writing-plans 技能产出**详细实施计划**：按模块拆分
+成有序任务，每步带测试检查点，保证每个中间提交都可编译、可运行、可验证。
