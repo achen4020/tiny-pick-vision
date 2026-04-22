@@ -42,7 +42,13 @@ output `REJECTED` but is not required to be correct.
 ### 3.1 Scene
 
 - Objects lie flat on a **fixed-color background board** (e.g., black anti-static mat).
-- Objects may touch but **do not stack** and **do not overlap**.
+- Objects **do not touch**, **do not stack**, and **do not overlap**. A minimum
+  inter-object gap (≥ 2 px at working resolution, i.e. ≥ ~1.5 mm for a typical
+  FOV) is enforced by the **upstream tooling / feeder / tray design**, not by
+  the vision module. The rationale is that a reliable physical gap is cheaper
+  and more provable than any blob-separation algorithm within the 20 KB
+  budget; it also removes an entire class of failure modes (silently merged
+  contours) from the 6σ accounting.
 - **One pick per cycle**: the module picks the single most-confident target per frame.
 - Object count per frame: 1 to ~30.
 - Object classes: **≤ 5 known classes**, fixed at compile time for a given production run.
@@ -131,7 +137,8 @@ void pose(const Blob *blob,
      │
      ▼  ccl_moments  — two-pass Rosenfeld-Pfaltz + union-find;
      │                 accumulates m00, m10, m01, μ20, μ11, μ02,
-     │                 μ30, μ21, μ12, μ03, bbox per label
+     │                 μ30, μ21, μ12, μ03, perimeter (4-neighbour),
+     │                 and bbox per label
   Blob[N]
      │
      ▼  size filter:  Amin ≤ m00 ≤ Amax (both compile-time constants)
@@ -141,9 +148,9 @@ void pose(const Blob *blob,
      │                    μ3-along-principal-axis sign
   Features[K]
      │
-     ▼  classify  — Mahalanobis distance against K templates;
-     │              REJECT if min_dist > reject_thresh
-     │              AMBIGUOUS if dist2 − dist1 < margin
+     ▼  classify  — **squared** Mahalanobis distance against K templates;
+     │              REJECT   if min_dist²             > reject_thresh
+     │              AMBIGUOUS if (dist²₂ − dist²₁)     < margin
   (class_id, confidence)[K]
      │
      ▼  pose  (accepted blobs only)
@@ -159,11 +166,12 @@ All fixed-size; all `.bss`.
 
 ```c
 typedef struct {
-    int32_t m00, m10, m01;                    // raw moments 0–1
-    int32_t mu20, mu11, mu02;                 // central 2nd
-    int32_t mu30, mu21, mu12, mu03;           // central 3rd
+    int32_t m00, m10, m01;                    // raw moments 0–1 (int32 safe for Amax ≤ 50000 px)
+    int64_t mu20, mu11, mu02;                 // central 2nd  (int64 — see P2-2 rationale in §7)
+    int64_t mu30, mu21, mu12, mu03;           // central 3rd  (int64 — can exceed 1e10)
+    int32_t perimeter;                        // 4-neighbour boundary-pixel count, accumulated in CCL pass 2
     int16_t bbox_x0, bbox_y0, bbox_x1, bbox_y1;
-} Blob;                                       // 48 B (40 int32 bytes + 8 int16 bytes)
+} Blob;                                       // 12 + 24 + 32 + 4 + 8 = 80 B
 
 #define N_FEAT 10
 typedef struct {
@@ -176,8 +184,10 @@ typedef struct {
 typedef struct {
     Features mean;
     int32_t  L_inv[N_FEAT*(N_FEAT+1)/2];  // inverse Cholesky lower-tri, Q16.16
-    int32_t  reject_thresh;               // squared Mahalanobis, Q16.16
+    int32_t  reject_thresh;               // **squared** Mahalanobis distance, Q16.16
 } Template;                               // 40 + 55*4 + 4 = 264 B, ×5 = 1.3 KB
+// All distances in this spec are squared Mahalanobis unless explicitly noted.
+// Runtime never computes sqrt — comparisons happen in squared space.
 
 typedef struct {
     int16_t x, y;            // centroid, pixel units
@@ -187,21 +197,34 @@ typedef struct {
 } Detection;                 // 8 B
 
 // .bss working buffers, sized for 640×480
-static uint8_t  g_bin[640*480/8];     //  38.4 KB
-static uint16_t g_labels[640*480];    // 614.4 KB
-static Blob     g_blobs[MAX_BLOBS];   //  12.3 KB  (MAX_BLOBS = 256)
-static uint32_t g_uf_parent[1024];    //   4.0 KB
-// Total working set ≈ 669 KB, well under the 512 MB RAM budget.
+//
+// Two independent caps:
+//   MAX_LABELS — worst-case raw label count from CCL pass 1 (noise-driven;
+//                matches uint16 label space).
+//   MAX_BLOBS  — post-union unique blobs actually surfaced to higher layers
+//                (expected ≤ ~30; 256 provides an ample safety margin).
+// Either cap saturating triggers TPV_SCENE_ERROR, guaranteed before any
+// buffer overrun.
+#define MAX_LABELS 65535
+#define MAX_BLOBS  256
+
+static uint8_t  g_bin[640*480/8];             //  38.4 KB
+static uint16_t g_labels[640*480];            // 614.4 KB
+static Blob     g_blobs[MAX_BLOBS];           //  20.0 KB  (256 × 80 B)
+static uint32_t g_uf_parent[MAX_LABELS + 1];  // 262.1 KB  (65536 × 4 B)
+// Total working set ≈ 935 KB, well under the 512 MB RAM budget.
 ```
 
 ## 7. Key Algorithm Decisions
 
 | Area | Decision | Rationale |
 |---|---|---|
-| Numeric type | `int32` fixed-point, Q16.16 throughout | Deterministic, no FPU dependency, bit-reproducible across builds |
+| Numeric type | `int32` fixed-point (Q16.16) for features, templates, and distances; `int64` for 2nd/3rd moment accumulators only (see "Moment bit-widths" row) | Deterministic, no FPU dependency, bit-reproducible across builds |
 | CCL | Two-pass Rosenfeld-Pfaltz with union-find + path compression | Smallest code that is provably correct; worst-case behavior analyzable |
 | Hu moment storage | `sign(h) * log(|h|+ε)` compressed to Q16.16 | Raw Hu moments span 10+ orders of magnitude; log compression keeps Mahalanobis numerically well-conditioned |
-| Distance | Mahalanobis, covariance inverse baked in as Cholesky | Per-class, per-dimension scaling automatic; gives principled rejection threshold |
+| Distance | **Squared** Mahalanobis; inverse Cholesky `L⁻¹` baked in per class; distance = ‖L⁻¹(x−μ)‖² | Per-class, per-dimension scaling automatic; squared form avoids any sqrt and is the natural χ²-like statistic for rejection thresholds |
+| Perimeter | Accumulated in CCL pass 2: a foreground pixel contributes +1 if any 4-neighbour is background | One extra 4-way compare per pixel; no second image pass |
+| Moment bit-widths | 2nd and 3rd central moments stored as `int64`; raw moments as `int32` | At 640×480 with a 307200-px blob, μ₂₀ ≈ 1e10; at Amax = 50000 px, |μ₃₀| can reach ~4e10. `int32` would silently wrap |
 | 180° disambiguation | Sign of μ₃ projected onto the principal axis | Symmetric objects degenerate to zero → no disambiguation needed, which is correct |
 | Threshold | Static, set once by calibration tool | Fixed lighting removes need for Otsu/adaptive; saves code |
 | Rotation handling | Invariants only — no rotated templates stored | Keeps template table tiny and match cost O(K) |
@@ -217,14 +240,16 @@ produces `model_data.c`. Steps:
 3. Per class, compute mean feature vector μ_c and covariance Σ_c.
 4. Compute Cholesky factor L such that Σ_c = L Lᵀ, store L⁻¹ (lower-tri, 55 floats
    per class, converted to Q16.16).
-5. `reject_thresh` = (max intra-class Mahalanobis distance observed) × safety_factor
-   (default 1.5).
-6. Validation step: for every pair of classes, compute the Mahalanobis distance
-   between means using each class's metric. If any pair's distance is less than
-   2 × reject_thresh, the tool **fails loudly** ("classes not separable with
-   current features; add/change features or change product mix"). This is the
-   gatekeeper that prevents silently deploying a model that cannot meet the
-   reject discipline.
+5. `reject_thresh` = (max intra-class **squared** Mahalanobis distance observed
+   across all training samples of that class) × safety_factor (default 1.5).
+   Units: squared-distance (Q16.16). No sqrt is ever applied.
+6. Separability check: for every pair of classes (c_i, c_j) compute the
+   **squared** Mahalanobis distance of μ_j under c_i's metric (and vice
+   versa). If `min(distance²) < 2 × max(reject_thresh_i, reject_thresh_j)`
+   for any pair, the tool **fails loudly** ("classes not separable with
+   current features; add/change features or change product mix"). This is
+   the gatekeeper that prevents silently deploying a model that cannot meet
+   the reject discipline. All comparisons are in squared-distance space.
 7. Emit `model_data.c` as a single `const Template templates[N_CLASSES]`.
 
 The tool and the runtime share the feature extractor so calibration-time and
@@ -236,11 +261,12 @@ runtime features are guaranteed identical.
 
 | Layer | Check | Output |
 |---|---|---|
-| L1 pre | No blob found | `EMPTY` |
-| L1 pre | Blob count ≥ MAX_BLOBS (hard cap 256, expected max ~30) | `SCENE_ERROR` |
+| L1 pre | No blob survives geometric filter | `EMPTY` |
+| L1 pre | Raw label count ≥ MAX_LABELS during CCL pass 1 | `SCENE_ERROR` |
+| L1 pre | Unique blob count ≥ MAX_BLOBS after union (hard cap 256, expected max ~30) | `SCENE_ERROR` |
 | L2 geom | Blob area ∉ [Amin, Amax] | Drop blob silently |
-| L3 class | min Mahalanobis distance > reject_thresh | `REJECTED (0xFF)` |
-| L3' class | (dist₂ − dist₁) < margin | `AMBIGUOUS (0xFE)` |
+| L3 class | min **squared** Mahalanobis distance > reject_thresh | `REJECTED (0xFF)` |
+| L3' class | (dist²₂ − dist²₁) < margin (margin in squared-distance units) | `AMBIGUOUS (0xFE)` |
 
 ### 9.2 Determinism Guarantees
 
@@ -282,7 +308,9 @@ architecturally honest way to hit 6σ.
 //   TPV_OK           (0)  → det_out populated; class_id carries the decision
 //                            (0..4 valid, 0xFE AMBIGUOUS, 0xFF REJECTED).
 //   TPV_EMPTY        (1)  → no blob passed the geometric filter; det_out zeroed.
-//   TPV_SCENE_ERROR  (2)  → blob count hit MAX_BLOBS cap; det_out zeroed.
+//   TPV_SCENE_ERROR  (2)  → CCL exceeded MAX_LABELS (pass-1 raw-label overflow)
+//                            OR post-union blob count exceeded MAX_BLOBS;
+//                            det_out zeroed.
 //   TPV_BAD_INPUT    (-1) → w/h mismatch with compile-time WxH or null pointer.
 int tpv_process_frame(const uint8_t *y, int w, int h, Detection *det_out);
 ```
@@ -291,19 +319,32 @@ int tpv_process_frame(const uint8_t *y, int w, int h, Detection *det_out);
 so that scene-level faults cannot be mistaken for per-object rejections; they are
 first-class return codes that the controller must handle explicitly.
 
-### 10.2 Output Payload (8 bytes, identical for all transports)
+### 10.2 Output Payload (9 bytes, identical for all transports)
 
 ```
 offset  bytes  field
-  0      2    x          little-endian int16, pixels
-  2      2    y          little-endian int16, pixels
-  4      2    theta_x10  little-endian int16, degrees × 10
-  6      1    class_id   0..4, or 0xFE AMBIGUOUS, 0xFF REJECTED
-  7      1    confidence 0..255
+  0      1    status     0=OK, 1=EMPTY, 2=SCENE_ERROR, 3=BAD_INPUT
+  1      2    x          little-endian int16, pixels   (valid iff status==OK)
+  3      2    y          little-endian int16, pixels   (valid iff status==OK)
+  5      2    theta_x10  little-endian int16, deg × 10 (valid iff status==OK)
+  7      1    class_id   0..4 normal; 0xFE AMBIGUOUS; 0xFF REJECTED (valid iff status==OK)
+  8      1    confidence 0..255                         (valid iff status==OK)
 ```
 
+The leading `status` byte mirrors the `tpv_process_frame` return code, so the
+receiving controller can distinguish **"no pickable object in scene"**
+(`status=EMPTY`) from **"vision subsystem silent"** (no frame received at all,
+visible only at the transport layer via timeout). `class_id` is deliberately
+reserved for *per-object* decisions only; scene-level faults never leak into
+it.
+
+When `status != OK`, offsets 1..8 are zero-filled and must be ignored by the
+receiver.
+
 Transport is platform-glue's responsibility. Serial and TCP/JSON wrappers are
-both trivial and can be compiled in or out with a config flag.
+both trivial and can be compiled in or out with a config flag; they are
+expected to add their own framing (e.g., STX/length/CRC) around this 9-byte
+logical payload as appropriate for the physical link.
 
 ### 10.3 Calibration Tool I/O
 
@@ -342,10 +383,11 @@ Before implementation, the following from §3.3 require user confirmation or ref
 2. **A2 (latency budget)**: is 30 ms the right target, or is the cycle budget
    tighter / looser?
 3. **A4 (output transport)**: pick one — serial binary, or TCP/JSON, or both.
-4. **Object count upper bound**: the expected per-frame max is ~30, but
-   `MAX_BLOBS` is set to 256 as a defensive hard cap. Confirm that 256 is
-   comfortable (scene never legitimately reaches it); otherwise lower it so
-   overflow triggers `SCENE_ERROR` earlier.
+4. **Object count upper bound**: expected per-frame max is ~30. `MAX_BLOBS`
+   is set to 256 as a defensive hard cap after CCL union; `MAX_LABELS` is
+   65535 for raw labels during CCL pass 1 (noise tolerance). Confirm 256
+   unique-blobs is comfortable (scene never legitimately reaches it);
+   otherwise lower it so overflow triggers `SCENE_ERROR` earlier.
 5. **Calibration UX**: does the PC tool need a GUI for operators, or is a CLI
    plus existing capture tooling sufficient?
 
