@@ -31,9 +31,21 @@ TEST(t_at_threshold_is_foreground) {
     CHECK_EQ_I(bin[0], 0x5C);  /* 0101 1100 */
 }
 
+TEST(t_non_byte_aligned_npix) {
+    /* w*h not a multiple of 8: only the lower bits of bin[0] are written.
+     * Y values: {200, 0, 200, 0, 200} with default threshold 128.
+     * Foreground at indices 0, 2, 4 → bin[0] = (1<<0)|(1<<2)|(1<<4) = 0x15.
+     * Bits 5..7 must remain 0 (initialized by the function's clear loop). */
+    uint8_t y[5] = {200, 0, 200, 0, 200};
+    uint8_t bin[1] = {0xFF};   /* poison: function must clear before writing */
+    tpv_threshold(y, 5, 1, bin);
+    CHECK_EQ_I(bin[0], 0x15);
+}
+
 int main(void) {
     RUN(t_all_zero_maps_to_zero_bits);
     RUN(t_all_255_maps_to_all_ones);
     RUN(t_at_threshold_is_foreground);
+    RUN(t_non_byte_aligned_npix);
     FINISH();
 }
