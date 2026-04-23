@@ -1,9 +1,13 @@
 #include "tpv_internal.h"
 
-/* During calibration the binary threshold default is good enough — the runtime
- * model_data.c emitted by the tool will carry the actual calibrated value.
- * tpv_threshold() (linked from src/) reads this extern, so we must define it. */
-const uint8_t tpv_bin_threshold = TPV_BIN_THRESH_DEFAULT;
+/* In calibration the binary threshold is *estimated* (Otsu on training-frame
+ * histogram, see frame_io.c) and then written back into this global before
+ * features are extracted. The runtime header still declares
+ * `extern const uint8_t tpv_bin_threshold` — that's fine: the runtime const
+ * promise applies to the embedded build (where model_data.c's value really is
+ * const). Calibration's mutable definition shadows it just for the calibrate
+ * binary's link unit. */
+uint8_t tpv_bin_threshold = TPV_BIN_THRESH_DEFAULT;
 
 /* tpv_templates is referenced by extern in tpv_internal.h; calibration never
  * reads it, but the linker still needs a definition to resolve the symbol
