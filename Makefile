@@ -5,7 +5,7 @@ AR_TARGET ?= llvm-ar
 STRIP     ?= llvm-strip
 
 # Flags
-CFLAGS_COMMON  = -std=c11 -Wall -Wextra -Werror -Wpedantic -Iinclude
+CFLAGS_COMMON  = -std=c11 -Wall -Wextra -Werror -Wpedantic -Iinclude -MMD -MP
 CFLAGS_HOST    = $(CFLAGS_COMMON) -g -O0 -DTPV_HOST_BUILD -D_POSIX_C_SOURCE=200809L
 CFLAGS_TARGET  = $(CFLAGS_COMMON) -Os -flto -ffreestanding -fno-exceptions \
                  -fno-asynchronous-unwind-tables -fomit-frame-pointer
@@ -13,6 +13,8 @@ CFLAGS_TARGET  = $(CFLAGS_COMMON) -Os -flto -ffreestanding -fno-exceptions \
 SRCS = src/threshold.c src/ccl_moments.c src/shape_features.c \
        src/classifier.c src/pose.c src/pipeline.c src/platform_glue.c \
        src/fixed_math.c
+
+HOST_OBJS = $(patsubst src/%.c,build/host/%.o,$(SRCS))
 
 TEST_FILES = $(wildcard tests/test_*.c)
 TEST_BINS  = $(patsubst tests/%.c,build/%,$(TEST_FILES))
@@ -31,10 +33,14 @@ test: $(TEST_BINS)
 build:
 	mkdir -p $@
 
-build/libtpv-host.a: $(SRCS) | build
-	$(CC_HOST) $(CFLAGS_HOST) -c $(SRCS)
-	ar rcs $@ *.o
-	rm -f *.o
+build/host:
+	mkdir -p $@
+
+build/host/%.o: src/%.c | build/host
+	$(CC_HOST) $(CFLAGS_HOST) -c $< -o $@
+
+build/libtpv-host.a: $(HOST_OBJS) | build
+	ar rcs $@ $(HOST_OBJS)
 
 build/libtpv-arm.so: $(SRCS) src/model_data.c | build
 	$(CC_TARGET) $(CFLAGS_TARGET) -shared -o $@ $(SRCS) src/model_data.c
@@ -59,4 +65,6 @@ size: build/libtpv-arm.so
 	 else echo "OK: $$file_sz ≤ 20480"; fi
 
 clean:
-	rm -rf build *.o *.a
+	rm -rf build
+
+-include $(HOST_OBJS:.o=.d) $(TEST_BINS:=.d)
