@@ -1,22 +1,11 @@
 #include <string.h>
 #include "tpv_internal.h"
 
-/* Working buffers (spec §6); bitmap is passed in as a parameter,
- * not stored here to avoid -Werror -Wunused-variable issues. */
+/* Working buffers (spec §6); bitmap is passed in as a parameter, not stored
+ * here to avoid -Werror -Wunused-variable issues. */
 static uint16_t g_labels[TPV_WIDTH * TPV_HEIGHT];
 static uint32_t g_uf[TPV_MAX_LABELS + 1];
-
-/* Per-blob raw moment accumulators. We compute *raw* moments in the per-pixel
- * loop and convert to central moments analytically afterwards (standard
- * change-of-origin formulas). Doing it this way:
- *   - eliminates the truncated-centroid bug (integer cx loses fractional half
- *     and synthesizes non-zero μ₃ for symmetric blobs);
- *   - merges the previous pass-2 + pass-3 into a single pass over the bitmap. */
-typedef struct {
-    int64_t m20, m11, m02;
-    int64_t m30, m21, m12, m03;
-} RawHi;
-static RawHi g_raw[TPV_MAX_BLOBS];
+static uint16_t g_remap[TPV_MAX_LABELS + 1];
 
 static uint32_t uf_find(uint32_t x) {
     while (g_uf[x] != x) {
@@ -73,15 +62,14 @@ int tpv_ccl_moments(const uint8_t *bin, int w, int h,
         }
     }
 
-    /* Build remap table: resolve equivalence classes to compact indices 1..n_blobs. */
-    static uint16_t remap[TPV_MAX_LABELS + 1];
-    memset(remap, 0, next_label * sizeof(uint16_t));
+    /* Build remap table: resolve equivalence classes to compact 1..n_blobs. */
+    memset(g_remap, 0, next_label * sizeof(uint16_t));
     int n_blobs = 0;
     for (uint32_t l = 1; l < next_label; l++) {
         uint32_t r = uf_find(l);
         if (r == l) {
             if (n_blobs >= max_blobs) return -2;  /* SCENE_ERROR */
-            remap[l] = (uint16_t)(n_blobs + 1);
+            g_remap[l] = (uint16_t)(n_blobs + 1);
             tpv_Blob *b = &blobs_out[n_blobs];
             memset(b, 0, sizeof *b);
             b->bbox_x0 = (int16_t)TPV_WIDTH;
@@ -93,36 +81,25 @@ int tpv_ccl_moments(const uint8_t *bin, int w, int h,
     }
     for (uint32_t l = 1; l < next_label; l++) {
         uint32_t r = uf_find(l);
-        remap[l] = remap[r];
+        g_remap[l] = g_remap[r];
     }
-    /* Zero high-order raw moment accumulators for the blobs we found. */
-    memset(g_raw, 0, (size_t)n_blobs * sizeof g_raw[0]);
 
-    /* Pass 2: per pixel, accumulate raw moments + perimeter + bbox.
-     * (No pass 3.) */
+    /* Pass 2: per pixel, accumulate m00, m10, m01, perimeter, bbox.
+     * Raw 2nd/3rd moments are *not* accumulated here — they'd be straightforward
+     * but the analytical raw→central conversion overflows int64 on 32-bit ARM
+     * (no __int128) *and* truncated integer division in a rearranged formula
+     * breaks translation invariance (an L-shape's μ₃ drifts with x-position,
+     * which feeds bogus per-position features into Hu invariants). */
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
             int idx = y * w + x;
-            uint16_t rl = g_labels[idx] ? remap[g_labels[idx]] : 0;
+            uint16_t rl = g_labels[idx] ? g_remap[g_labels[idx]] : 0;
             if (!rl) continue;
-            int blob_i = rl - 1;
-            tpv_Blob *b = &blobs_out[blob_i];
-            RawHi  *r = &g_raw[blob_i];
+            tpv_Blob *b = &blobs_out[rl - 1];
 
             b->m00 += 1;
             b->m10 += x;
             b->m01 += y;
-
-            int64_t xx = (int64_t)x * x;
-            int64_t yy = (int64_t)y * y;
-            int64_t xy = (int64_t)x * y;
-            r->m20 += xx;
-            r->m11 += xy;
-            r->m02 += yy;
-            r->m30 += xx * x;
-            r->m21 += xx * y;
-            r->m12 += yy * x;
-            r->m03 += yy * y;
 
             if (x < b->bbox_x0) b->bbox_x0 = (int16_t)x;
             if (y < b->bbox_y0) b->bbox_y0 = (int16_t)y;
@@ -138,50 +115,60 @@ int tpv_ccl_moments(const uint8_t *bin, int w, int h,
         }
     }
 
-    /* Convert raw moments to central moments analytically.
+    /* Pass 3: per blob, compute Q16.16 centroid, then iterate its bbox to
+     * accumulate central moments from exact fractional offsets.
      *
-     *   μ20 = m20 - sx²/M
-     *   μ02 = m02 - sy²/M
-     *   μ11 = m11 - sx·sy/M
-     *   μ30 = m30 - 3·sx·m20/M + 2·sx³/M²
-     *   μ21 = m21 - 2·sx·m11/M - sy·m20/M + 2·sx²·sy/M²
-     *   μ12 = m12 - 2·sy·m11/M - sx·m02/M + 2·sy²·sx/M²
-     *   μ03 = m03 - 3·sy·m02/M + 2·sy³/M²
+     * Why Q16.16 cx rather than integer cx: an integer cx = ⌊sx/M⌋ loses the
+     * fractional centroid (e.g. 3.5 for an 8×8 square → 3), which synthesizes
+     * non-zero μ₃ for symmetric blobs. Q16.16 cx_q16 = ⌊sx·2¹⁶/M⌋ keeps the
+     * fractional part accurate to 1/2¹⁶. Crucially, translation invariance is
+     * preserved exactly: under x ← x + Δ, cx_q16 increases by Δ·2¹⁶ (exactly,
+     * because ΔM·2¹⁶ divides M), so dx = (x·2¹⁶ − cx_q16) is coordinate-free.
      *
-     * The 32-bit ARM target has no __int128, so the intermediate products
-     * must stay within int64. With m00 ≤ TPV_AMAX (50000) the bounds are:
-     *   sx ≤ M·W ≤ 50000·640 = 3.2e7
-     *   m20 ≤ M·W² ≤ 50000·640² = 2e10
-     *   sx·m20 ≤ 6.4e17, *3 ≤ 1.9e18 → fits int64 (9.2e18).
-     *   sx² ≤ 1e15 → sx²/M ≤ 1e15. Then *(sx/M) ≤ ·640 = 6.4e17 → fits.
-     *   sx²·sy/M² computed as ((sx·sy)/M)·(sx/M): each factor fits int64.
-     *
-     * Blobs with m00 > TPV_AMAX cannot satisfy these bounds, so we skip the
-     * central-moment computation for them — pipeline's L2 area filter drops
-     * them anyway. Their bbox / perimeter / m00..m01 are still emitted so
-     * pipeline can do the filter without surprise. */
+     * Magnitudes on the deployment target (m00 ≤ TPV_AMAX = 50000, W ≤ 640):
+     *   |dx|  ≤ W·2¹⁶ ≈ 4.2e7                   (int64 ✓)
+     *   dx²  ≤ 1.8e15, >>16 into Q16.16 ≤ 2.8e10 per pixel
+     *   Σ over 50000 px: ≤ 1.4e15 (int64 ✓)
+     *   dx³  (Q16.16) per pixel ≤ 2.8e10·4.2e7>>16 ≈ 1.8e13
+     *   Σ over 50000 px: ≤ 9e17 (int64 ✓, margin vs 9.2e18 max). */
     for (int i = 0; i < n_blobs; i++) {
         tpv_Blob *b = &blobs_out[i];
-        RawHi    *r = &g_raw[i];
-        int64_t M  = b->m00;
+        int64_t M = b->m00;
         if (M == 0 || M > TPV_AMAX) continue;
-        int64_t sx = b->m10;
-        int64_t sy = b->m01;
+        int64_t cx_q16 = (b->m10 * (int64_t)65536) / M;
+        int64_t cy_q16 = (b->m01 * (int64_t)65536) / M;
 
-        int64_t sx2_M  = sx * sx / M;       /* ≤ ~1e15/1, but practically ≤ M·W² */
-        int64_t sy2_M  = sy * sy / M;
-        int64_t sxsy_M = sx * sy / M;
+        int64_t a20 = 0, a11 = 0, a02 = 0;
+        int64_t a30 = 0, a21 = 0, a12 = 0, a03 = 0;
+        for (int y = b->bbox_y0; y <= b->bbox_y1; y++) {
+            for (int x = b->bbox_x0; x <= b->bbox_x1; x++) {
+                int idx = y * w + x;
+                uint16_t rl = g_labels[idx] ? g_remap[g_labels[idx]] : 0;
+                if (rl != (uint16_t)(i + 1)) continue;
 
-        b->mu20 = r->m20 - sx2_M;
-        b->mu02 = r->m02 - sy2_M;
-        b->mu11 = r->m11 - sxsy_M;
+                int64_t dx = ((int64_t)x << 16) - cx_q16;
+                int64_t dy = ((int64_t)y << 16) - cy_q16;
+                int64_t dx2 = (dx * dx) >> 16;           /* Q16.16 */
+                int64_t dy2 = (dy * dy) >> 16;
+                int64_t dxy = (dx * dy) >> 16;
 
-        b->mu30 = r->m30 - 3 * sx * r->m20 / M  + 2 * sx2_M  * sx / M;
-        b->mu21 = r->m21 - 2 * sx * r->m11 / M  - sy * r->m20 / M
-                                                + 2 * sxsy_M * sx / M;
-        b->mu12 = r->m12 - 2 * sy * r->m11 / M  - sx * r->m02 / M
-                                                + 2 * sxsy_M * sy / M;
-        b->mu03 = r->m03 - 3 * sy * r->m02 / M  + 2 * sy2_M  * sy / M;
+                a20 += dx2;
+                a11 += dxy;
+                a02 += dy2;
+                a30 += (dx2 * dx) >> 16;                 /* Q16.16 */
+                a21 += (dx2 * dy) >> 16;
+                a12 += (dxy * dy) >> 16;
+                a03 += (dy2 * dy) >> 16;
+            }
+        }
+        /* >> 16 shift converts Q16.16 accumulators to integer μ_pq. */
+        b->mu20 = a20 >> 16;
+        b->mu11 = a11 >> 16;
+        b->mu02 = a02 >> 16;
+        b->mu30 = a30 >> 16;
+        b->mu21 = a21 >> 16;
+        b->mu12 = a12 >> 16;
+        b->mu03 = a03 >> 16;
     }
 
     return n_blobs;
