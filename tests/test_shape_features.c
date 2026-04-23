@@ -52,14 +52,14 @@ TEST(t_large_blob_no_eccentricity_overflow) {
     b.bbox_x0 = 0; b.bbox_x1 = 639;
     b.bbox_y0 = 0; b.bbox_y1 = 479;
 
-    /* Cross-check: did tr*tr actually overflow in plain int64? If not, the
-     * test is vacuous (as a prior version was, sitting at tr=2.4e9). */
+    /* Precondition: tr*tr must actually overflow int64 under the naïve path,
+     * or this test is vacuous (as a prior version was, sitting at tr=2.4e9).
+     * sqrt(INT64_MAX) ≈ 3.037e9; any tr strictly above that forces tr*tr
+     * past INT64_MAX. We assert the threshold directly rather than computing
+     * tr*tr and inspecting the wrap: signed-integer overflow is UB, so a
+     * compiler (or UBSan) is free to elide or trap on that multiply. */
     int64_t tr_check = b.mu20 + b.mu02;
-    int64_t sq_check = tr_check * tr_check;
-    /* Signed overflow is UB, but in practice wraps: the observable wrap gives
-     * |sq_check| wildly different from 2.5e19 — either negative or much
-     * smaller. Both outcomes mean the naïve path is unsafe. */
-    CHECK(sq_check < (int64_t)9.2e18);   /* would be 2.5e19 if no wrap */
+    CHECK(tr_check > 3037000499LL);
 
     tpv_Features f;
     tpv_shape_features(&b, &f);
