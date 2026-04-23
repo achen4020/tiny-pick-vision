@@ -19,7 +19,7 @@ HOST_OBJS = $(patsubst src/%.c,build/host/%.o,$(SRCS))
 TEST_FILES = $(wildcard tests/test_*.c)
 TEST_BINS  = $(patsubst tests/%.c,build/%,$(TEST_FILES))
 
-.PHONY: host target test size check-layout clean
+.PHONY: host target test size check-layout check-layout-target clean
 
 host: build/libtpv-host.a
 target: build/libtpv-arm.so
@@ -54,6 +54,14 @@ build/replay: tools/replay.c $(SRCS) tests/stub_model_data.c | build
 check-layout: tests/check_layout.c | build
 	$(CC_HOST) $(CFLAGS_HOST) -c $< -o build/check_layout.o
 	@echo "OK: tpv_Blob layout assert held under host toolchain"
+
+# HG5: enforce sizeof(tpv_Blob) == 80 under the actual ARM AAPCS target ABI.
+# Requires Android NDK on PATH; install with:
+#   sdkmanager "ndk;26.1.10909125"  (or any 24+)
+#   PATH="$NDK/toolchains/llvm/prebuilt/<host>/bin:$PATH"
+check-layout-target: tests/check_layout.c | build
+	$(CC_TARGET) $(CFLAGS_TARGET) -c $< -o build/check_layout_arm.o
+	@echo "OK: tpv_Blob 80B / 8B-align under armv7a-linux-androideabi"
 
 size: build/libtpv-arm.so
 	$(STRIP) --strip-all $<
