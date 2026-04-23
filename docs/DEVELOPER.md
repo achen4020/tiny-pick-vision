@@ -51,7 +51,9 @@ Native macOS / Linux clang or gcc — the host build needs no SDKs.
 make check-layout                # verify Blob/Features ABI under host toolchain
 make test                        # build + run every tests/test_*.c
 make -C tools/calibrate all test # build calibrate CLI + run its tests
-make build/replay                # build the regression replay tool
+# `make build/replay` also exists, but it links the real src/model_data.c
+# (produced by calibration, §4) — not listed here because it fails on a
+# clean clone until calibration has been run. See §8.
 ```
 
 `make test` builds one independent executable per test file (`build/test_<name>`)
@@ -138,13 +140,17 @@ message pointing at the right flag.
 ```bash
 # For a 2-class line:
 make clean
-CFLAGS_COMMON='-std=c11 -Wall -Wextra -Werror -Wpedantic -Iinclude -MMD -MP \
-               -DTPV_N_CLASSES=2' \
-  make target size
+make CFLAGS_COMMON='-std=c11 -Wall -Wextra -Werror -Wpedantic -Iinclude -MMD -MP -DTPV_N_CLASSES=2' \
+     target size
 
 # For the default 5-class line, nothing extra is needed:
 make clean && make target size
 ```
+
+The `CFLAGS_COMMON=...` **must** be on the `make` command line, not in the
+environment — `Makefile` assigns `CFLAGS_COMMON` with a plain `=`, which
+overrides environment values. Command-line `make VAR=...` wins; `VAR=... make`
+silently does nothing.
 
 The same `-DTPV_N_CLASSES=N` has to be passed to `make test` and
 `make build/replay` whenever N ≠ 5, otherwise `tests/stub_model_data.c`
@@ -152,10 +158,9 @@ The same `-DTPV_N_CLASSES=N` has to be passed to `make test` and
 configured N either. The simplest path:
 
 ```bash
-export CFLAGS_EXTRA="-DTPV_N_CLASSES=2"
 make clean
-CFLAGS_COMMON="-std=c11 -Wall -Wextra -Werror -Wpedantic -Iinclude -MMD -MP $CFLAGS_EXTRA" \
-  make test size target build/replay
+make CFLAGS_COMMON='-std=c11 -Wall -Wextra -Werror -Wpedantic -Iinclude -MMD -MP -DTPV_N_CLASSES=2' \
+     test size target build/replay
 ```
 
 ---
@@ -226,6 +231,11 @@ Spec §10.2 wire byte mapping is internal to `tpv_serialize_payload`:
 ---
 
 ## 8. Replay regression (post-release)
+
+Build the tool with `make build/replay`. It links the real calibrated
+`src/model_data.c`, so calibration (§4) **must have already run** on a clean
+clone — otherwise the build fails with `No rule to make target 'src/model_data.c'`,
+which is the correct signal to calibrate first.
 
 `build/replay <frames_dir> > release.csv`. The CSV has `frame_name` as its
 first column — diff baseline ↔ release **by joining on frame_name**, not by
