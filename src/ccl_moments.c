@@ -140,60 +140,48 @@ int tpv_ccl_moments(const uint8_t *bin, int w, int h,
 
     /* Convert raw moments to central moments analytically.
      *
-     *   μ20 = m20 - m10² / M
-     *   μ02 = m02 - m01² / M
-     *   μ11 = m11 - m10·m01 / M
-     *   μ30 = m30 - 3·m10·m20/M + 2·m10³/M²
-     *   μ21 = m21 - 2·m10·m11/M - m01·m20/M + 2·m10²·m01/M²
-     *   μ12 = m12 - 2·m01·m11/M - m10·m02/M + 2·m01²·m10/M²
-     *   μ03 = m03 - 3·m01·m02/M + 2·m01³/M²
+     *   μ20 = m20 - sx²/M
+     *   μ02 = m02 - sy²/M
+     *   μ11 = m11 - sx·sy/M
+     *   μ30 = m30 - 3·sx·m20/M + 2·sx³/M²
+     *   μ21 = m21 - 2·sx·m11/M - sy·m20/M + 2·sx²·sy/M²
+     *   μ12 = m12 - 2·sy·m11/M - sx·m02/M + 2·sy²·sx/M²
+     *   μ03 = m03 - 3·sy·m02/M + 2·sy³/M²
      *
-     * Worst-case magnitudes for 640×480 inputs make m10·m20 ≈ 8e18 (just inside
-     * int64) and m10³ ≈ 8e24 (overflows int64). Use __int128 throughout and
-     * narrow only at the end. */
+     * The 32-bit ARM target has no __int128, so the intermediate products
+     * must stay within int64. With m00 ≤ TPV_AMAX (50000) the bounds are:
+     *   sx ≤ M·W ≤ 50000·640 = 3.2e7
+     *   m20 ≤ M·W² ≤ 50000·640² = 2e10
+     *   sx·m20 ≤ 6.4e17, *3 ≤ 1.9e18 → fits int64 (9.2e18).
+     *   sx² ≤ 1e15 → sx²/M ≤ 1e15. Then *(sx/M) ≤ ·640 = 6.4e17 → fits.
+     *   sx²·sy/M² computed as ((sx·sy)/M)·(sx/M): each factor fits int64.
+     *
+     * Blobs with m00 > TPV_AMAX cannot satisfy these bounds, so we skip the
+     * central-moment computation for them — pipeline's L2 area filter drops
+     * them anyway. Their bbox / perimeter / m00..m01 are still emitted so
+     * pipeline can do the filter without surprise. */
     for (int i = 0; i < n_blobs; i++) {
         tpv_Blob *b = &blobs_out[i];
         RawHi    *r = &g_raw[i];
         int64_t M  = b->m00;
-        if (M == 0) continue;
+        if (M == 0 || M > TPV_AMAX) continue;
         int64_t sx = b->m10;
         int64_t sy = b->m01;
 
-        __int128 sx2 = (__int128)sx * sx;
-        __int128 sy2 = (__int128)sy * sy;
-        __int128 sxsy = (__int128)sx * sy;
-        __int128 sx2_M = sx2 / M;
-        __int128 sy2_M = sy2 / M;
-        __int128 sxsy_M = sxsy / M;
+        int64_t sx2_M  = sx * sx / M;       /* ≤ ~1e15/1, but practically ≤ M·W² */
+        int64_t sy2_M  = sy * sy / M;
+        int64_t sxsy_M = sx * sy / M;
 
-        b->mu20 = (int64_t)((__int128)r->m20 - sx2_M);
-        b->mu02 = (int64_t)((__int128)r->m02 - sy2_M);
-        b->mu11 = (int64_t)((__int128)r->m11 - sxsy_M);
+        b->mu20 = r->m20 - sx2_M;
+        b->mu02 = r->m02 - sy2_M;
+        b->mu11 = r->m11 - sxsy_M;
 
-        __int128 sx3   = sx2 * sx;
-        __int128 sy3   = sy2 * sy;
-        __int128 sx2sy = sx2 * sy;
-        __int128 sy2sx = sy2 * sx;
-        __int128 M2    = (__int128)M * M;
-
-        __int128 mu30 = (__int128)r->m30
-                      - 3 * (__int128)sx * r->m20 / M
-                      + 2 * sx3 / M2;
-        __int128 mu21 = (__int128)r->m21
-                      - 2 * (__int128)sx * r->m11 / M
-                      - (__int128)sy * r->m20 / M
-                      + 2 * sx2sy / M2;
-        __int128 mu12 = (__int128)r->m12
-                      - 2 * (__int128)sy * r->m11 / M
-                      - (__int128)sx * r->m02 / M
-                      + 2 * sy2sx / M2;
-        __int128 mu03 = (__int128)r->m03
-                      - 3 * (__int128)sy * r->m02 / M
-                      + 2 * sy3 / M2;
-        b->mu30 = (int64_t)mu30;
-        b->mu21 = (int64_t)mu21;
-        b->mu12 = (int64_t)mu12;
-        b->mu03 = (int64_t)mu03;
+        b->mu30 = r->m30 - 3 * sx * r->m20 / M  + 2 * sx2_M  * sx / M;
+        b->mu21 = r->m21 - 2 * sx * r->m11 / M  - sy * r->m20 / M
+                                                + 2 * sxsy_M * sx / M;
+        b->mu12 = r->m12 - 2 * sy * r->m11 / M  - sx * r->m02 / M
+                                                + 2 * sxsy_M * sy / M;
+        b->mu03 = r->m03 - 3 * sy * r->m02 / M  + 2 * sy2_M  * sy / M;
     }
 
     return n_blobs;
