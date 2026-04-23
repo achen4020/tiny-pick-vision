@@ -2,7 +2,7 @@
 ROOT    := $(abspath ../..)
 CC      ?= cc
 CFLAGS  := -std=c11 -Wall -Wextra -Werror -I$(ROOT)/include -g -O0 \
-           -D_POSIX_C_SOURCE=200809L
+           -D_POSIX_C_SOURCE=200809L -DTPV_CAL_BUILD
 LDFLAGS := -lm
 
 # calibrate.c carries main() — split it from the reusable lib so test binaries

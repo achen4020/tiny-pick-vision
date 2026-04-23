@@ -4,3 +4,6 @@ src/model_data.c
 *.a
 *.gcno
 *.gcda
+
+.DS_Store
+.idea/

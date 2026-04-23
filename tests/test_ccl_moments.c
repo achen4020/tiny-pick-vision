@@ -36,9 +36,27 @@ TEST(t_max_labels_overflow_returns_neg1) {
     CHECK((n < 0) || (n <= TPV_MAX_BLOBS));
 }
 
+TEST(t_symmetric_square_has_zero_third_moments) {
+    /* Regression: an N×N filled square is point-symmetric → all 3rd-order
+     * central moments must be exactly 0. The original implementation rounded
+     * the centroid to the nearest integer and synthesized non-zero μ_3 for
+     * even-sized squares. */
+    uint8_t bin[8];
+    for (int i = 0; i < 8; i++) bin[i] = 0xFF;
+    tpv_Blob blobs[4];
+    int n = tpv_ccl_moments(bin, 8, 8, blobs, 4);
+    CHECK_EQ_I(n, 1);
+    CHECK_EQ_I(blobs[0].mu30, 0);
+    CHECK_EQ_I(blobs[0].mu21, 0);
+    CHECK_EQ_I(blobs[0].mu12, 0);
+    CHECK_EQ_I(blobs[0].mu03, 0);
+    CHECK_EQ_I(blobs[0].mu11, 0);   /* x and y are independent over a square */
+}
+
 int main(void) {
     RUN(t_single_square_blob);
     RUN(t_two_disjoint_blobs);
     RUN(t_max_labels_overflow_returns_neg1);
+    RUN(t_symmetric_square_has_zero_third_moments);
     FINISH();
 }

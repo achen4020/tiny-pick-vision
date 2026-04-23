@@ -5,15 +5,16 @@
 #include "tpv_internal.h"
 
 /* Calibration tool API (in stats.c, separability.c, codegen.c, frame_io.c) */
-int    tpv_cal_load_class_frames(const char *dir, tpv_Features *out, int cap);
-void   tpv_cal_mean_cov(const tpv_Features *s, int n, int32_t *mean, double *cov);
-void   tpv_cal_regularize(double *cov, const double *sigma_ref_sq);
-int    tpv_cal_cholesky_inv(const double *cov, int32_t *L_inv_q16);
-int    tpv_cal_quantize_or_fail(double real, int32_t *q16_out, const char *label);
-double tpv_cal_mahal_sq(const tpv_Features *x, const int32_t *mean_q16,
-                        const int32_t *L_inv_q16);
-int    tpv_cal_check_separability(const tpv_Template *tmpl, int n);
-int    tpv_cal_emit_model(const tpv_Template *t, int n, uint8_t bin_thresh, FILE *out);
+int     tpv_cal_load_class_frames(const char *dir, tpv_Features *out, int cap);
+uint8_t tpv_cal_estimate_bin_threshold(const char *const *dirs, int n_dirs);
+void    tpv_cal_mean_cov(const tpv_Features *s, int n, int32_t *mean, double *cov);
+void    tpv_cal_regularize(double *cov, const double *sigma_ref_sq);
+int     tpv_cal_cholesky_inv(const double *cov, int32_t *L_inv_q16);
+int     tpv_cal_quantize_or_fail(double real, int32_t *q16_out, const char *label);
+double  tpv_cal_mahal_sq(const tpv_Features *x, const int32_t *mean_q16,
+                         const int32_t *L_inv_q16);
+int     tpv_cal_check_separability(const tpv_Template *tmpl, int n);
+int     tpv_cal_emit_model(const tpv_Template *t, int n, uint8_t bin_thresh, FILE *out);
 
 #define MAX_CLASSES               5
 #define MAX_SAMPLES_PER_CLASS   256
@@ -54,7 +55,13 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    /* 1. Load samples per class */
+    /* 1a. Estimate the binary threshold via Otsu over a histogram sampled from
+     *     all class directories. Writes into the runtime extern so step 1b's
+     *     feature extraction uses the calibrated value (not the 128 default). */
+    uint8_t bin_thresh = tpv_cal_estimate_bin_threshold(class_dirs, n_classes);
+    fprintf(stderr, "calibrate: Otsu bin_threshold = %u\n", bin_thresh);
+
+    /* 1b. Load samples per class. */
     static tpv_Features samples[MAX_CLASSES][MAX_SAMPLES_PER_CLASS];
     int nsamp[MAX_CLASSES] = {0};
     for (int c = 0; c < n_classes; c++) {
@@ -116,12 +123,9 @@ int main(int argc, char **argv) {
     /* 5. Pairwise separability sanity check */
     if (tpv_cal_check_separability(tmpl, n_classes) < 0) return 1;
 
-    /* 6. Emit model_data.c */
+    /* 6. Emit model_data.c (carrying the Otsu-estimated bin_thresh from 1a). */
     FILE *out = fopen(out_path, "w");
     if (!out) { perror("open out"); return 1; }
-    /* TODO when first wired into a real line: estimate bin_thresh from frame
-     * background rather than using TPV_BIN_THRESH_DEFAULT. */
-    uint8_t bin_thresh = TPV_BIN_THRESH_DEFAULT;
     tpv_cal_emit_model(tmpl, n_classes, bin_thresh, out);
     fclose(out);
     fprintf(stderr, "calibrate: wrote %s for %d class(es)\n", out_path, n_classes);

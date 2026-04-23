@@ -227,8 +227,22 @@ These were left non-blocking in spec §13:
 
 Other deferred work (non-blocking, found during implementation):
 
-- **Pass 7 of T2** (single-pass moment fusion via raw moments): defer until
-  on-target timing measurement says we need it.
-- **Full 360° pose disambig**: `pose.c` uses a simplified `μ₃₀ + μ₀₃` proxy.
-  The full cubic projection on the principal axis (spec §7) is needed if
-  asymmetric parts at the back half of the rotation circle become a problem.
+- **Single-pass moment fusion** (T2 step 7): now done. `ccl_moments.c`
+  accumulates raw moments per pixel and derives central moments analytically
+  in one final per-blob loop. The previous bbox-restricted third pass is gone.
+
+- **Full 360° pose disambig**: `theta_x10` is reported in the principal-axis
+  range only (modulo π / [-90°, 90°] effectively, since the disambig term
+  was dropped). `m3_axis_sign` is reported as 0 always.
+
+  The proper computation (spec §7: sign of μ₃ projected onto the principal
+  axis, which is rotation-invariant) needs `R = sqrt(A² + B²)` followed by
+  cubic moment products that overflow `int64`. It requires either:
+    - `__int128` arithmetic with a 128-bit `isqrt`, **or**
+    - floating-point `sqrt` at runtime, which spec §9.2 forbids.
+
+  The current narrow-but-correct behavior is consistent (no rotation-
+  dependent sign flip). Robot integrators must resolve the 180° ambiguity at
+  the gripper layer (typical for industrial picks — the gripper has a
+  preferred orientation it can rotate to). Re-introduce the projection if a
+  future product needs single-pass full-360° pose.

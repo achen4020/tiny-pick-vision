@@ -79,10 +79,15 @@ void tpv_shape_features(const tpv_Blob *b, tpv_Features *f) {
         f->eccentricity = (int32_t)tpv_isqrt_q16(one_minus_ratio << 16);
     }
 
-    /* m3_axis_sign: simplified — full version projects μ₃ onto principal axis.
-     * For symmetric shapes (4×4 square: all μ_3 = 0) this gives 0 as required. */
-    int64_t proj_simple = b->mu30 + b->mu03;
-    if (proj_simple > TPV_M3_EPS)        f->m3_axis_sign =  1;
-    else if (proj_simple < -TPV_M3_EPS)  f->m3_axis_sign = -1;
-    else                                  f->m3_axis_sign =  0;
+    /* m3_axis_sign: spec §7 calls for sign of μ₃ projected onto the principal
+     * axis (rotation-invariant). The proper computation needs sqrt(A²+B²) with
+     * cubic moment products that overflow int64 — it requires either __int128
+     * arithmetic + 128-bit isqrt, or floating-point sqrt at runtime (which
+     * spec §9.2 forbids). Until that lands, report 0 (no disambiguation),
+     * which is correct-but-narrower behavior: the integrator gets θ modulo π
+     * from pose.c and must resolve the 180° ambiguity at the gripper level
+     * (typical for industrial picks).
+     *
+     * Documented as a known limitation in docs/DEVELOPER.md §9. */
+    f->m3_axis_sign = 0;
 }
