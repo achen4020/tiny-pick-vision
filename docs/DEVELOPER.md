@@ -152,10 +152,21 @@ environment — `Makefile` assigns `CFLAGS_COMMON` with a plain `=`, which
 overrides environment values. Command-line `make VAR=...` wins; `VAR=... make`
 silently does nothing.
 
-The same `-DTPV_N_CLASSES=N` has to be passed to `make test` and
-`make build/replay` whenever N ≠ 5, otherwise `tests/stub_model_data.c`
-(which emits exactly `TPV_N_CLASSES` zero templates) won't match the
-configured N either. The simplest path:
+The same `-DTPV_N_CLASSES=N` has to be passed to every build target whenever
+N ≠ 5, but for **different** reasons — don't conflate them when diagnosing
+mismatches:
+
+- `make test`: `tests/stub_model_data.c` emits exactly `TPV_N_CLASSES` zero
+  templates; without the flag, the stub's array size disagrees with what
+  the test binaries are compiled against, and linking fails.
+- `make target` and `make build/replay`: both link the **real**
+  `src/model_data.c`. That file carries a
+  `_Static_assert(TPV_N_CLASSES == <calibrated n>, ...)` emitted by the
+  calibration tool; a mismatched `TPV_N_CLASSES` fails the assert at
+  compile time with the exact remediation flag in the error message.
+
+The stub is never linked into `target` or `replay`. The simplest path to
+keep the whole tree consistent:
 
 ```bash
 make clean
