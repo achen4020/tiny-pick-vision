@@ -94,7 +94,7 @@
 │ ccl_moments.c       ~3 KB   CCL + 矩累加        │
 │ shape_features.c    ~1 KB   矩 → 特征           │
 │ classifier.c        ~1 KB   马氏距离 + 拒绝     │
-│ pose.c              ~0.5 KB 位姿 + 180° 消歧    │
+│ pose.c              ~0.5 KB 位姿（θ mod π，未消歧；见 §7）│
 ├────────────────────────────────────────────────┤
 │ model_data.c        ~1 KB   模板常量            │
 └────────────────────────────────────────────────┘
@@ -146,7 +146,7 @@ void pose(const Blob *blob,
   有效 Blob[K]
      │
      ▼  shape_features — log|Hu[0..6]|, perim/√area, eccentricity,
-     │                   μ3 沿主轴方向的符号
+     │                   m3_axis_sign（当前实现恒为 0，见 §7「180° 消歧」）
   Features[K]
      │
      ▼  pose — 对每个 size-filter 存活的 blob 计算 (x, y, θ)

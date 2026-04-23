@@ -21,9 +21,9 @@ include/
 src/
     threshold.c        Y → bitmap (LSB-first packed)
     ccl_moments.c      CCL + raw moments + perimeter (per-edge)
-    shape_features.c   moments → 10-D feature vector (7 Hu + perim_ratio + ecc + m3_sign)
+    shape_features.c   moments → 10-D feature vector (7 Hu + perim_ratio + ecc + m3_sign placeholder)
     classifier.c       squared Mahalanobis + tri-partition (ACCEPTED/AMBIGUOUS/REJECTED)
-    pose.c             centroid + principal axis + 180° disambig
+    pose.c             centroid + principal axis (θ mod π; 180° disambig deferred — §9)
     pipeline.c         per-frame scheduling + argmax-over-ACCEPTED policy
     platform_glue.c    9-byte wire payload serializer (transport stub)
     fixed_math.c       Q16.16 isqrt / log / atan2
@@ -161,7 +161,7 @@ calibration tool's own test tree. HG5 fires at compile time via
 | `TPV_N_CLASSES` | 5 | Production-line class count, 1..5. Must match calibration output. |
 | `TPV_AMIN`, `TPV_AMAX` | 500, 50000 | Geometric filter on blob area in pixels. |
 | `TPV_BIN_THRESH_DEFAULT` | 128 | Y-channel threshold; calibration writes the production value. |
-| `TPV_M3_EPS` | 0x1000 (≈0.0625) | μ₃ projection magnitude below which 180° disambig defers. |
+| `TPV_M3_EPS` | 0x1000 (≈0.0625) | Reserved threshold for the future μ₃-on-principal-axis projection. Currently unused — `m3_axis_sign` is hard-set to 0 (see §9). |
 
 Compile with e.g. `-DTPV_N_CLASSES=2` to override. The `tpv_config.h`
 guard rejects values outside 1..5.
@@ -188,7 +188,7 @@ tpv_serialize_payload(rc, &det, buf);
 
 | `rc` | `det.class_id` | Robot action |
 |---|---|---|
-| `TPV_OK` | 0..4 | Pick at (x, y, theta_x10) |
+| `TPV_OK` | 0..4 | Pick at (x, y, θ). `theta_x10` is **mod π** (range [−900, 899]); the gripper layer chooses ±π based on its own symmetry — see §9. |
 | `TPV_OK` | `TPV_CLASS_AMBIGUOUS` (0xFE) | **Do not pick.** Operator alert. (x, y) is the centroid for diagnostics. |
 | `TPV_OK` | `TPV_CLASS_REJECTED` (0xFF) | Same: do not pick. |
 | `TPV_EMPTY` | n/a | No object on the surface. |
