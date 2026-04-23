@@ -130,8 +130,33 @@ means CCL produces exactly one blob with `m00 ∈ [TPV_AMIN, TPV_AMAX]`.
 
 ### After calibration
 
-Rebuild the runtime: `make target && make size`. The new `model_data.c` is
-picked up automatically because the Makefile depends on it.
+Rebuild the runtime **with `TPV_N_CLASSES` matching the calibrated class
+count**. The emitted `model_data.c` contains a `_Static_assert` that fires
+at compile time if the two disagree, so a mismatched rebuild fails with a
+message pointing at the right flag.
+
+```bash
+# For a 2-class line:
+make clean
+CFLAGS_COMMON='-std=c11 -Wall -Wextra -Werror -Wpedantic -Iinclude -MMD -MP \
+               -DTPV_N_CLASSES=2' \
+  make target size
+
+# For the default 5-class line, nothing extra is needed:
+make clean && make target size
+```
+
+The same `-DTPV_N_CLASSES=N` has to be passed to `make test` and
+`make build/replay` whenever N ≠ 5, otherwise `tests/stub_model_data.c`
+(which emits exactly `TPV_N_CLASSES` zero templates) won't match the
+configured N either. The simplest path:
+
+```bash
+export CFLAGS_EXTRA="-DTPV_N_CLASSES=2"
+make clean
+CFLAGS_COMMON="-std=c11 -Wall -Wextra -Werror -Wpedantic -Iinclude -MMD -MP $CFLAGS_EXTRA" \
+  make test size target build/replay
+```
 
 ---
 
