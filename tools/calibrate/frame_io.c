@@ -12,12 +12,15 @@ static int by_name(const void *a, const void *b) {
     return strcmp(*(const char* const*)a, *(const char* const*)b);
 }
 
-/* Otsu's method: build a histogram from up to 5 frames per directory and pick
- * the threshold maximizing between-class variance. Returns the chosen value
- * AND writes it into the runtime extern so subsequent tpv_threshold() calls
- * (in tpv_cal_load_class_frames) see it. Falls back to TPV_BIN_THRESH_DEFAULT
- * if no readable frames. Doubles are fine: this is a one-shot host-side
- * computation, not the runtime per-frame path. */
+/* Otsu's method: build a histogram from up to 5 frames per directory (the
+ * first 5 in alphabetical order — readdir() is unordered, so without sorting
+ * the chosen frames vary by filesystem and run, producing non-reproducible
+ * thresholds and non-reproducible model_data.c) and pick the threshold
+ * maximizing between-class variance. Writes the result into the runtime
+ * extern so subsequent tpv_threshold() calls (in tpv_cal_load_class_frames)
+ * see it. Falls back to TPV_BIN_THRESH_DEFAULT if no readable frames.
+ * Doubles are fine: this is a one-shot host-side computation, not the
+ * runtime per-frame path. */
 uint8_t tpv_cal_estimate_bin_threshold(const char *const *dirs, int n_dirs) {
     static uint64_t hist[256];
     memset(hist, 0, sizeof hist);
@@ -26,21 +29,31 @@ uint8_t tpv_cal_estimate_bin_threshold(const char *const *dirs, int n_dirs) {
     for (int d = 0; d < n_dirs; d++) {
         DIR *dir = opendir(dirs[d]);
         if (!dir) continue;
+        char *names[1024]; int nn = 0;
         struct dirent *e;
-        int n_loaded = 0;
-        while ((e = readdir(dir)) && n_loaded < 5) {
+        while ((e = readdir(dir)) && nn < (int)(sizeof names / sizeof names[0])) {
             if (e->d_name[0] == '.') continue;
-            char path[1024];
-            snprintf(path, sizeof path, "%s/%s", dirs[d], e->d_name);
-            FILE *f = fopen(path, "rb");
-            if (!f) continue;
-            if (fread(y, 1, sizeof y, f) == sizeof y) {
-                for (int i = 0; i < TPV_WIDTH * TPV_HEIGHT; i++) hist[y[i]]++;
-                n_loaded++;
-            }
-            fclose(f);
+            names[nn++] = strdup(e->d_name);
         }
         closedir(dir);
+        qsort(names, nn, sizeof names[0], by_name);
+
+        int n_loaded = 0;
+        for (int i = 0; i < nn; i++) {
+            if (n_loaded < 5) {
+                char path[1024];
+                snprintf(path, sizeof path, "%s/%s", dirs[d], names[i]);
+                FILE *f = fopen(path, "rb");
+                if (f) {
+                    if (fread(y, 1, sizeof y, f) == sizeof y) {
+                        for (int p = 0; p < TPV_WIDTH * TPV_HEIGHT; p++) hist[y[p]]++;
+                        n_loaded++;
+                    }
+                    fclose(f);
+                }
+            }
+            free(names[i]);
+        }
     }
 
     uint64_t total = 0, sum_total = 0;
