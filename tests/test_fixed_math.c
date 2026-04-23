@@ -14,9 +14,16 @@ TEST(t_log_e) {
     CHECK(lg >= (1 << 16) - 500 && lg <= (1 << 16) + 500);
 }
 
+TEST(t_atan2_axis) {
+    /* On-axis: atan2(0, +x) = 0, atan2(+y, 0) > 0, atan2(-y, 0) < 0. */
+    CHECK(tpv_atan2_q16(0, 1) == 0);
+    CHECK(tpv_atan2_q16(1, 0) > 0);
+    CHECK(tpv_atan2_q16(-1, 0) < 0);
+}
+
 int main(void) {
     RUN(t_isqrt_4);
     RUN(t_log_e);
-    /* T5 will append RUN(t_atan2_axis) once tpv_atan2_q16 is exercised */
+    RUN(t_atan2_axis);
     FINISH();
 }
