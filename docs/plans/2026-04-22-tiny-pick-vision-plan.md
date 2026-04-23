@@ -189,9 +189,12 @@ typedef struct {
 int tpv_process_frame(const uint8_t *y, int w, int h, tpv_Detection *det_out);
 
 /* spec §10.2 wire payload 序列化（9 字节，传输层共用）
- * status 取值见 TPV_OK / TPV_EMPTY / TPV_SCENE_ERROR / TPV_BAD_INPUT。
+ * status 直接传 tpv_process_frame 的返回码（int，可能是 -1 = TPV_BAD_INPUT），
+ * 函数内部映射到 spec §10.2 的 wire byte（0=OK, 1=EMPTY, 2=SCENE_ERROR,
+ * 3=BAD_INPUT）。这是因为 in-process API 的负数错误码（-1）不能直接写到
+ * wire 上，否则会被截成 0xFF 而不是约定值 3。
  * buf9 由调用方分配，至少 9 字节。 */
-void tpv_serialize_payload(uint8_t status, const tpv_Detection *d, uint8_t *buf9);
+void tpv_serialize_payload(int status, const tpv_Detection *d, uint8_t *buf9);
 
 #endif
 ```
@@ -248,8 +251,17 @@ void tpv_pose(const tpv_Blob *blob,
 extern const tpv_Template tpv_templates[TPV_N_CLASSES];
 extern const uint8_t      tpv_bin_threshold;
 
+/* 定点数学辅助（实现在 src/fixed_math.c），多个模块都会用 */
+int64_t tpv_isqrt_q16(int64_t x_q16);            /* 整数平方根，Q16.16 输入输出 */
+int32_t tpv_log_q16(int64_t x_q16);              /* 自然对数，Q16.16 输入输出 */
+int32_t tpv_atan2_q16(int64_t y, int64_t x);    /* atan2 Q16.16 弧度 */
+
 #endif
 ```
+
+> 命名约定：`fixed_math.c` 里所有公开符号都用 `tpv_` 前缀（`tpv_isqrt_q16`
+> 等），与运行时模块的命名空间保持一致。`shape_features.c` / `pose.c` 调
+> 用时**不要**再写本地 `static` 声明——直接 include `tpv_internal.h`。
 
 - [ ] **Step 5: 写 `tests/testlib.h` 和 `tests/testlib.c`（极简测试运行器）**
 
@@ -355,6 +367,10 @@ build/libtpv-arm.so: $(SRCS) src/model_data.c | build
 
 # 单测可执行：每个 test_*.c 独立 link
 build/test_%: tests/test_%.c tests/testlib.c $(SRCS) tests/stub_model_data.c | build
+	$(CC_HOST) $(CFLAGS_HOST) -o $@ $^ -lm
+
+# 长稳回放工具（host 跑，T10 step 3 实现）
+build/replay: tools/replay.c $(SRCS) tests/stub_model_data.c | build
 	$(CC_HOST) $(CFLAGS_HOST) -o $@ $^ -lm
 
 # 编译期布局断言（不依赖任何 SRCS）—— T0 就能跑
@@ -540,42 +556,25 @@ git commit -m "feat(threshold): Y→bitmap with LSB-first packing + 3 tests"
 - Create: `src/ccl_moments.c`
 - Create: `tests/test_ccl_moments.c`
 
-- [ ] **Step 1: 先写 union-find 最小测试 + 完整 main()**
+- [ ] **Step 1: 先写 test 文件骨架（占位 main，等 step 2 注入真实 test）**
 
 > **测试文件统一约定**（适用于 T1..T10 所有 task）：每个 `tests/test_*.c`
 > 在 step 1 同时落 `main()`。后续 step 加新 `TEST(...)` 时**同步更新
 > main 里的 `RUN(...)` 列表**。这样每个绿色 / 红色 checkpoint 都基于
 > 一个能被 Makefile 链接的可执行文件——否则 `make build/test_<name>`
 > 直接卡在缺 main 的链接错。
+>
+> CCL 用的并查集是 ccl_moments.c 内部 static 函数，**不**做白盒单测
+> （否则得引入 TPV_TEST_EXPOSE 让 static 变 extern，与可见性原则冲突）。
+> 它的正确性通过 step 2 的"单 blob / 双 blob"黑盒断言间接验证。
 
 ```c
-/* tests/test_ccl_moments.c —— 这是这个文件的完整初版骨架 */
+/* tests/test_ccl_moments.c —— 初版骨架，step 2 注入真实 TEST */
 #include "tpv_internal.h"
 #include "testlib.h"
 
-/* 暴露给测试的 union-find；正式实现时放在 ccl_moments.c 静态段，用
-   TPV_TEST_EXPOSE 宏开条件编译以允许测试可见。 */
-#ifdef TPV_TEST_EXPOSE
-extern uint32_t uf_find(uint32_t x);
-extern void     uf_union(uint32_t a, uint32_t b);
-extern void     uf_reset(int n);
-#endif
-
-TEST(t_uf_basic) {
-#ifdef TPV_TEST_EXPOSE
-    uf_reset(10);
-    CHECK_EQ_I(uf_find(3), 3);
-    uf_union(3, 7);
-    CHECK_EQ_I(uf_find(7), uf_find(3));
-    uf_union(7, 9);
-    CHECK_EQ_I(uf_find(3), uf_find(9));
-    CHECK_EQ_I(uf_find(2), 2);  /* 未合并的节点不受影响 */
-#endif
-}
-
 int main(void) {
-    RUN(t_uf_basic);
-    /* step 2 / step 6 加新 test 时把名字 RUN 在这里 */
+    /* step 2 / step 6 把 RUN(...) 加在这里 */
     FINISH();
 }
 ```
@@ -610,26 +609,19 @@ TEST(t_two_disjoint_blobs) {
     CHECK_EQ_I(n, 2);
 }
 
-TEST(t_touching_blobs_become_one_not_two) {
-    /* 两个方块共享边：CCL 必须合并为单一 blob（spec §3.1 前提下上料
-       工装保证非接触，所以这里只是验证"确实是 CCL 把它们合并"，
-       不要误以为有分离算法） */
-    uint8_t bin[8] = {0xFF, 0xFF, 0, 0, 0xFF, 0xFF, 0, 0};
-    tpv_Blob blobs[4];
-    int n = tpv_ccl_moments(bin, 8, 8, blobs, 4);
-    CHECK_EQ_I(n, 1);           /* 合并后只有 1 个 */
-    CHECK_EQ_I(blobs[0].m00, 32); /* 两个 2x8 合并 = 32 像素 */
-}
+/* 注：之前这里曾有一个"两块共享边 → CCL 合并成 1"的用例，因为它实际上
+ * 把位图写成了"两条隔开的横条"（4-conn 应该是 2 个 blob），断言 1 是错
+ * 的，会把正确实现误判为失败。该用例已删除：单 blob / 双 blob 两条用例
+ * 已经把 CCL 在连通 / 不连通两种情形下的行为各覆盖了一边；spec §3.1
+ * 又禁止物品互相接触，"接触合并"这一行为不再需要专门测试。*/
 ```
 
 把 main() 里 `RUN(...)` 列表更新为：
 
 ```c
 int main(void) {
-    RUN(t_uf_basic);
     RUN(t_single_square_blob);
     RUN(t_two_disjoint_blobs);
-    RUN(t_touching_blobs_become_one_not_two);
     /* step 6 还会 RUN t_max_labels_overflow_returns_neg1 */
     FINISH();
 }
@@ -673,8 +665,10 @@ static void uf_union(uint32_t a, uint32_t b) {
 }
 static void uf_reset(int n) { for (int i = 0; i <= n; i++) g_uf[i] = (uint32_t)i; }
 
-static inline int bit_at(const uint8_t *bin, int w, int x, int y) {
-    if (x < 0 || y < 0 || x >= w) return 0;
+static inline int bit_at(const uint8_t *bin, int w, int h, int x, int y) {
+    if (x < 0 || y < 0 || x >= w || y >= h) return 0;   /* y >= h 必须查；
+                                                           底边像素的 (x,y+1)
+                                                           读会越界 */
     int idx = y * w + x;
     return (bin[idx >> 3] >> (idx & 7)) & 1;
 }
@@ -742,8 +736,8 @@ int tpv_ccl_moments(const uint8_t *bin, int w, int h,
             if (x > b->bbox_x1) b->bbox_x1 = (int16_t)x;
             if (y > b->bbox_y1) b->bbox_y1 = (int16_t)y;
             /* 周长：4 邻域中任一为背景则 +1 */
-            if (!bit_at(bin, w, x-1, y) || !bit_at(bin, w, x+1, y) ||
-                !bit_at(bin, w, x, y-1) || !bit_at(bin, w, x, y+1)) {
+            if (!bit_at(bin, w, h, x-1, y) || !bit_at(bin, w, h, x+1, y) ||
+                !bit_at(bin, w, h, x, y-1) || !bit_at(bin, w, h, x, y+1)) {
                 b->perimeter += 1;
             }
         }
@@ -881,9 +875,8 @@ int main(void) {
 ```c
 #include "tpv_internal.h"
 
-/* 定点对数：用查表 + 线性插值，8 KB 表太大，改用牛顿迭代的 2^n 归一化法
-   近似 ln，Q16.16 精度。此处省略为辅助函数 log_q16(x)。*/
-static int32_t log_q16(int64_t x_q16);    /* 返回 Q16.16 */
+/* 定点辅助 tpv_isqrt_q16 / tpv_log_q16 在 src/fixed_math.c，原型在
+   tpv_internal.h；这里直接调，不再写本地 static 声明。*/
 
 void tpv_shape_features(const tpv_Blob *b, tpv_Features *f) {
     /* 归一化：η_pq = μ_pq / m00^((p+q)/2 + 1)。用 Q16.16 */
@@ -897,7 +890,7 @@ void tpv_shape_features(const tpv_Blob *b, tpv_Features *f) {
     int64_t n02 = (b->mu02 << 16) / m00sq;
     int64_t n11 = (b->mu11 << 16) / m00sq;
     /* 3 阶归一化除以 m00^(2.5)，用 m00^2 * sqrt(m00) 近似 */
-    int64_t sqrt_m00_q16 = isqrt_q16(m00 << 16);
+    int64_t sqrt_m00_q16 = tpv_isqrt_q16(m00 << 16);
     int64_t m00_25 = (m00sq * sqrt_m00_q16) >> 16;
     int64_t n30 = (b->mu30 << 16) / m00_25;
     int64_t n21 = (b->mu21 << 16) / m00_25;
@@ -930,12 +923,12 @@ void tpv_shape_features(const tpv_Blob *b, tpv_Features *f) {
         /* Q16.16 log |h| 压缩 */
         int64_t ax = h[i] < 0 ? -h[i] : h[i];
         int32_t sign = h[i] < 0 ? -1 : 1;
-        int32_t lg = log_q16(ax + 1);   /* +1 防 log(0) */
+        int32_t lg = tpv_log_q16(ax + 1);   /* +1 防 log(0) */
         f->hu[i] = sign * lg;
     }
 
     /* perim_ratio = perimeter / sqrt(area) */
-    int64_t sqrt_area = isqrt_q16(m00 << 16);
+    int64_t sqrt_area = tpv_isqrt_q16(m00 << 16);
     f->perim_ratio = (int32_t)(((int64_t)b->perimeter << 32) / sqrt_area);
 
     /* eccentricity = sqrt(1 - λ_min/λ_max) where λ are 2x2 covariance eigenvalues */
@@ -943,7 +936,7 @@ void tpv_shape_features(const tpv_Blob *b, tpv_Features *f) {
     int64_t tr = b->mu20 + b->mu02;
     int64_t det = b->mu20 * b->mu02 - b->mu11 * b->mu11;
     int64_t disc = tr*tr - 4*det;
-    int64_t sdisc = disc > 0 ? isqrt_q16(disc << 16) : 0;
+    int64_t sdisc = disc > 0 ? tpv_isqrt_q16(disc << 16) : 0;
     int64_t l1 = (tr + (sdisc >> 16)) / 2;
     int64_t l2 = (tr - (sdisc >> 16)) / 2;
     if (l1 < l2) { int64_t t = l1; l1 = l2; l2 = t; }
@@ -951,7 +944,7 @@ void tpv_shape_features(const tpv_Blob *b, tpv_Features *f) {
     else {
         int64_t ratio = (l2 << 16) / l1;   /* Q16.16, ∈ [0,1] */
         int64_t one = 1 << 16;
-        f->eccentricity = (int32_t)isqrt_q16(((one - ratio) << 16));
+        f->eccentricity = (int32_t)tpv_isqrt_q16(((one - ratio) << 16));
     }
 
     /* m3_axis_sign：μ₃ 在主轴方向的投影符号。主轴方向 (cosθ, sinθ)，
@@ -965,13 +958,13 @@ void tpv_shape_features(const tpv_Blob *b, tpv_Features *f) {
 }
 ```
 
-注：上面 `log_q16` 和 `isqrt_q16` 是 `src/fixed_math.c` 的辅助函数。本任务里要一并实现它们并单测。
+注：上面 `tpv_log_q16` 和 `tpv_isqrt_q16` 是 `src/fixed_math.c` 的辅助函数。本任务里要一并实现它们并单测。
 
 - [ ] **Step 4: 加 `src/fixed_math.c` + `tests/test_fixed_math.c`**
 
 ```c
 /* src/fixed_math.c */
-int64_t isqrt_q16(int64_t x_q16) {
+int64_t tpv_isqrt_q16(int64_t x_q16) {
     if (x_q16 <= 0) return 0;
     /* 牛顿法，初值 = x/2 */
     int64_t r = x_q16;
@@ -982,7 +975,7 @@ int64_t isqrt_q16(int64_t x_q16) {
     return r;
 }
 
-int32_t log_q16(int64_t x_q16) {
+int32_t tpv_log_q16(int64_t x_q16) {
     /* x_q16 是 Q16.16。用 ln(x) = ln(2) * log2(x)；log2 按二分归一化 */
     if (x_q16 <= 0) return -(1 << 30);
     int shift = 0;
@@ -1003,14 +996,14 @@ int32_t log_q16(int64_t x_q16) {
 Test:
 ```c
 TEST(t_isqrt_4) {
-    /* isqrt_q16(4.0 Q16.16) = 2.0 Q16.16 */
-    int64_t r = isqrt_q16(4LL << 16);
+    /* tpv_isqrt_q16(4.0 Q16.16) = 2.0 Q16.16 */
+    int64_t r = tpv_isqrt_q16(4LL << 16);
     CHECK(r >= (2LL << 16) - 10 && r <= (2LL << 16) + 10);
 }
 TEST(t_log_e) {
     /* log(e) ≈ 1 */
     int64_t e_q16 = 178145;  /* e * 65536 */
-    int32_t lg = log_q16(e_q16);
+    int32_t lg = tpv_log_q16(e_q16);
     CHECK(lg >= (1 << 16) - 500 && lg <= (1 << 16) + 500);
 }
 
@@ -1035,7 +1028,7 @@ Expected: `N passed, 0 failed`。
 
 ```bash
 git add src/shape_features.c src/fixed_math.c tests/test_shape_features.c tests/test_fixed_math.c include
-# 将 isqrt_q16 / log_q16 前置声明加到 tpv_internal.h
+# 将 tpv_isqrt_q16 / tpv_log_q16 前置声明加到 tpv_internal.h
 git commit -m "feat(features): Hu moments + perim_ratio + eccentricity + m3_axis_sign; fixed-math helpers"
 ```
 
@@ -1312,10 +1305,7 @@ main 加一行 `RUN(t_axis_angle_of_horizontal_bar);`。
 - [ ] **Step 4: 实现 `src/pose.c`**
 
 ```c
-#include "tpv_internal.h"
-
-/* 简化的 Q16.16 atan2，返回弧度 Q16.16。工业做法用查表。*/
-int32_t atan2_q16(int64_t y, int64_t x);   /* 放在 fixed_math.c */
+#include "tpv_internal.h"   /* tpv_atan2_q16 原型已在此 */
 
 void tpv_pose(const tpv_Blob *b,
               int16_t *x_out, int16_t *y_out, int16_t *theta_x10_out) {
@@ -1326,7 +1316,7 @@ void tpv_pose(const tpv_Blob *b,
     /* θ = 0.5 · atan2(2·μ₁₁, μ₂₀ − μ₀₂) */
     int64_t num = 2 * b->mu11;
     int64_t den = b->mu20 - b->mu02;
-    int32_t theta_q16 = atan2_q16(num, den) / 2;   /* Q16.16 弧度 */
+    int32_t theta_q16 = tpv_atan2_q16(num, den) / 2;   /* Q16.16 弧度 */
 
     /* 180° 消歧（spec §7）：用简化 m3 proj 符号决定是否 +π */
     int32_t proj = (int32_t)(b->mu30 + b->mu03);
@@ -1344,7 +1334,7 @@ void tpv_pose(const tpv_Blob *b,
 }
 ```
 
-- [ ] **Step 5: 实现 `atan2_q16` 加测试，补到 `src/fixed_math.c`**
+- [ ] **Step 5: 实现 `tpv_atan2_q16` 加测试，补到 `src/fixed_math.c`**
 
 ```c
 /* atan_table[i] = atan(i/64) * 65536，i = 0..64，即 [0, π/4] 区间 */
@@ -1360,7 +1350,7 @@ static const int32_t atan_table[65] = {
     52125
 };
 
-int32_t atan2_q16(int64_t y, int64_t x) {
+int32_t tpv_atan2_q16(int64_t y, int64_t x) {
     if (x == 0 && y == 0) return 0;
     /* 象限归约：先化到 x>0，然后把 (x, y) 化到 |y| <= x（即 [0, π/4]）
      * 再查表，最后按象限加偏移。*/
@@ -1384,9 +1374,9 @@ int32_t atan2_q16(int64_t y, int64_t x) {
 
 ```c
 TEST(t_atan2_axis) {
-    CHECK(atan2_q16(0, 1) == 0);
-    CHECK(atan2_q16(1, 0) > 0);
-    CHECK(atan2_q16(-1, 0) < 0);
+    CHECK(tpv_atan2_q16(0, 1) == 0);
+    CHECK(tpv_atan2_q16(1, 0) > 0);
+    CHECK(tpv_atan2_q16(-1, 0) < 0);
 }
 ```
 
@@ -1583,9 +1573,20 @@ git commit -m "feat(pipeline): per-frame scheduling + argmax policy + HG4"
 #include "tpv.h"
 #include "tpv_internal.h"
 
+/* in-process 返回码 → wire status byte（spec §10.2） */
+static uint8_t status_to_wire(int rc) {
+    switch (rc) {
+        case TPV_OK:           return 0;
+        case TPV_EMPTY:        return 1;
+        case TPV_SCENE_ERROR:  return 2;
+        case TPV_BAD_INPUT:    return 3;
+        default:               return 0xFF;  /* 未知错误，保留与 0..3 区分 */
+    }
+}
+
 /* 9 字节 wire payload 序列化（spec §10.2） */
-void tpv_serialize_payload(uint8_t status, const tpv_Detection *d, uint8_t *buf9) {
-    buf9[0] = status;
+void tpv_serialize_payload(int status, const tpv_Detection *d, uint8_t *buf9) {
+    buf9[0] = status_to_wire(status);
     if (status != TPV_OK) { memset(buf9 + 1, 0, 8); return; }
     buf9[1] = (uint8_t)(d->x & 0xFF);
     buf9[2] = (uint8_t)((d->x >> 8) & 0xFF);
@@ -1603,12 +1604,15 @@ void tpv_serialize_payload(uint8_t status, const tpv_Detection *d, uint8_t *buf9
 - [ ] **Step 2: 加 payload 字节序测试**
 
 ```c
+/* 注意：buf[0] 是 spec §10.2 的 wire status byte（0..3），不是
+ * tpv_process_frame 的 in-process 返回码（可能是 -1）。这两套命名
+ * 由 status_to_wire() 显式映射，测试断言在 wire 一侧。 */
 TEST(t_wire_payload_ok) {
     tpv_Detection d = { .x = 0x0102, .y = 0x0304, .theta_x10 = 0x0506,
                         .class_id = 7, .confidence_q8 = 200 };
     uint8_t buf[9];
     tpv_serialize_payload(TPV_OK, &d, buf);
-    CHECK_EQ_I(buf[0], TPV_OK);
+    CHECK_EQ_I(buf[0], 0);   /* TPV_OK → wire 0 */
     CHECK_EQ_I(buf[1], 0x02); CHECK_EQ_I(buf[2], 0x01);
     CHECK_EQ_I(buf[3], 0x04); CHECK_EQ_I(buf[4], 0x03);
     CHECK_EQ_I(buf[5], 0x06); CHECK_EQ_I(buf[6], 0x05);
@@ -1618,13 +1622,23 @@ TEST(t_wire_payload_empty) {
     tpv_Detection d = { .x = 1, .y = 2, .theta_x10 = 3, .class_id = 4, .confidence_q8 = 5 };
     uint8_t buf[9];
     tpv_serialize_payload(TPV_EMPTY, &d, buf);
-    CHECK_EQ_I(buf[0], TPV_EMPTY);
+    CHECK_EQ_I(buf[0], 1);   /* TPV_EMPTY → wire 1 */
+    for (int i = 1; i < 9; i++) CHECK_EQ_I(buf[i], 0);
+}
+TEST(t_wire_payload_bad_input_maps_to_3) {
+    /* 这是 spec §10.2 与 in-process 返回码不一致时最容易踩坑的地方：
+       TPV_BAD_INPUT 在 in-process 是 -1，wire 上必须是 3。 */
+    tpv_Detection d = {0};
+    uint8_t buf[9] = {0xAA};
+    tpv_serialize_payload(TPV_BAD_INPUT, &d, buf);
+    CHECK_EQ_I(buf[0], 3);
     for (int i = 1; i < 9; i++) CHECK_EQ_I(buf[i], 0);
 }
 
 int main(void) {
     RUN(t_wire_payload_ok);
     RUN(t_wire_payload_empty);
+    RUN(t_wire_payload_bad_input_maps_to_3);
     FINISH();
 }
 ```
@@ -2176,7 +2190,7 @@ OK: NNNN ≤ 20480
 ```
 
 若 FAIL：先看 section 表里谁占大头。
-- 若 `.text + .rodata` 已逼近 20 KB：瘦身代码 — 把 `log_q16`/`atan2_q16`
+- 若 `.text + .rodata` 已逼近 20 KB：瘦身代码 — 把 `tpv_log_q16`/`tpv_atan2_q16`
   的查表精度从 64 表项降到 32；去掉 `DEBUG_TRACE`；让 `tpv_classify` 的
   内层循环内联展开。
 - 若 `.text + .rodata` 很小但 `.dynsym + .dynstr + 重定位` 撑爆 20 KB：
