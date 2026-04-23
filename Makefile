@@ -48,7 +48,13 @@ build/libtpv-arm.so: $(SRCS) src/model_data.c | build
 build/test_%: tests/test_%.c tests/testlib.c $(SRCS) tests/stub_model_data.c | build
 	$(CC_HOST) $(CFLAGS_HOST) -o $@ $^ -lm
 
-build/replay: tools/replay.c $(SRCS) tests/stub_model_data.c | build
+# Host-side regression replay MUST link the real calibrated model_data.c so
+# the CSV represents actual production decisions. Linking tests/stub_model_data
+# would make every frame land as REJECTED with confidence 0, turning the
+# "bit-identical decision across hosts" diff meaningless. If src/model_data.c
+# is absent, make stops with "No rule to make target" — the correct signal to
+# run the calibration tool first.
+build/replay: tools/replay.c $(SRCS) src/model_data.c | build
 	$(CC_HOST) $(CFLAGS_HOST) -o $@ $^ -lm
 
 check-layout: tests/check_layout.c | build

@@ -56,6 +56,7 @@ extern const uint8_t      tpv_bin_threshold;
 
 /* Fixed-point math helpers (in src/fixed_math.c), used by multiple modules */
 int64_t tpv_isqrt_q16(int64_t x_q16);
+int64_t tpv_isqrt_i64(int64_t x);                /* plain floor(sqrt) for large int64 */
 int32_t tpv_log_q16(int64_t x_q16);
 int32_t tpv_atan2_q16(int64_t y, int64_t x);
 

@@ -2,7 +2,11 @@
 
 /* Q16.16 integer square root via Newton's iteration.
  * At fixed point: r = ((x_q16 << 16) / r + r) / 2 satisfies r² = x_q16 << 16,
- * so r = sqrt(x_q16) in Q16.16. */
+ * so r = sqrt(x_q16) in Q16.16.
+ *
+ * IMPORTANT: inputs > ~2^47 make `x_q16 << 16` overflow int64 inside the
+ * Newton step. Use tpv_isqrt_i64 below for plain integer sqrt of large
+ * values (e.g. eccentricity's discriminant). */
 int64_t tpv_isqrt_q16(int64_t x_q16) {
     if (x_q16 <= 0) return 0;
     int64_t r = x_q16;
@@ -10,6 +14,22 @@ int64_t tpv_isqrt_q16(int64_t x_q16) {
         int64_t q = (x_q16 << 16) / r;
         r = (r + q) / 2;
     }
+    return r;
+}
+
+/* Plain integer floor-sqrt: returns floor(sqrt(x)) for any non-negative int64.
+ * Uses the same Newton iteration but without the << 16 scaling, so it's safe
+ * for the full int64 range. Converges to the fixed point then stops. */
+int64_t tpv_isqrt_i64(int64_t x) {
+    if (x <= 0) return 0;
+    int64_t r = x, last = -1;
+    for (int i = 0; i < 64 && r != last; i++) {
+        last = r;
+        r = (r + x / r) / 2;
+    }
+    /* Newton can land on floor(sqrt)+1 for perfect-square-minus-epsilon inputs;
+     * correct one step down if so. */
+    while (r > 0 && r > x / r) r--;
     return r;
 }
 
