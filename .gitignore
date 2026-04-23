@@ -1,0 +1,6 @@
+build/
+src/model_data.c
+*.o
+*.a
+*.gcno
+*.gcda
