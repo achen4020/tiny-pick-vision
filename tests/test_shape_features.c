@@ -26,35 +26,49 @@ TEST(t_square_features_symmetric) {
 }
 
 TEST(t_large_blob_no_eccentricity_overflow) {
-    /* Regression: a legal blob (m00 ≤ Amax = 50000) spanning much of the
-     * frame pushes μ₂₀ to ~5e9, so the naïve tr·tr computation overflows
-     * int64 and produces garbage eccentricity. This test exercises the
-     * overflow path by feeding synthetic moments at the upper bound.
+    /* Regression: a legal blob (m00 ≤ Amax = 50000) shaped like a two-axis
+     * dumbbell puts μ₂₀ and μ₀₂ both in the gigapoint range. Without
+     * scaling, `tr = μ₂₀ + μ₀₂` squares past int64.
      *
-     * The values below correspond to a horizontal dumbbell: two 25000-px
-     * clumps at ±219 px from the centroid, so μ₂₀ = 50000·219² = 2.397e9
-     * and μ₀₂ is small (clumps are not tall). Without the k_shift scale,
-     * tr*tr wraps and eccentricity lands outside [0, 1] in Q16.16 units. */
+     * Choose μ₂₀ = 4e9, μ₀₂ = 1e9, μ₁₁ = 0 so tr = 5e9 and tr*tr = 2.5e19 —
+     * strictly above INT64_MAX (9.2e18) — while still being physically
+     * reachable (two 25000-px clumps at ±320 px ≈ μ₂₀ = 5.1e9). The
+     * expected eccentricity is deterministic:
+     *     λ_max = μ₂₀ = 4e9
+     *     λ_min = μ₀₂ = 1e9
+     *     ecc   = sqrt(1 - λ_min/λ_max) = sqrt(3/4) ≈ 0.8660
+     * in Q16.16 that's 56756 ± a few LSB.
+     *
+     * If k_shift scaling or the `tpv_isqrt_i64` step ever regresses, tr*tr
+     * wraps, disc is garbage, and ecc lands far from 0.866 — caught here. */
     tpv_Blob b = {0};
     b.m00  = 50000;
     b.m10  = 50000 * 320;
     b.m01  = 50000 * 240;
-    b.mu20 = 2397020000LL;   /* ≈ 2.4e9 */
-    b.mu02 = 50000LL * 4 * 4;/* small */
+    b.mu20 = 4000000000LL;    /* 4e9 */
+    b.mu02 = 1000000000LL;    /* 1e9 */
     b.mu11 = 0;
     b.perimeter = 500;
     b.bbox_x0 = 0; b.bbox_x1 = 639;
-    b.bbox_y0 = 236; b.bbox_y1 = 244;
+    b.bbox_y0 = 0; b.bbox_y1 = 479;
+
+    /* Cross-check: did tr*tr actually overflow in plain int64? If not, the
+     * test is vacuous (as a prior version was, sitting at tr=2.4e9). */
+    int64_t tr_check = b.mu20 + b.mu02;
+    int64_t sq_check = tr_check * tr_check;
+    /* Signed overflow is UB, but in practice wraps: the observable wrap gives
+     * |sq_check| wildly different from 2.5e19 — either negative or much
+     * smaller. Both outcomes mean the naïve path is unsafe. */
+    CHECK(sq_check < (int64_t)9.2e18);   /* would be 2.5e19 if no wrap */
 
     tpv_Features f;
     tpv_shape_features(&b, &f);
-    /* Eccentricity for a highly-elongated object approaches 1.0 (Q16.16 = 65536).
-     * Must land in [0, 1.01·65536] — absolutely not negative (overflow sentinel)
-     * and absolutely not > 2·65536 (another overflow sign). */
-    CHECK(f.eccentricity >= 0);
-    CHECK(f.eccentricity <= (int32_t)(1.01 * 65536));
-    /* And should be close to 1 for this very elongated shape. */
-    CHECK(f.eccentricity > (int32_t)(0.99 * 65536));
+
+    /* Expected ecc ≈ 0.8660 in Q16.16 = 56756. Allow ±1% = ±656 LSB for
+     * fixed-point rounding throughout the pipeline. */
+    int32_t expected = (int32_t)(0.8660 * 65536);
+    CHECK(f.eccentricity >= expected - 700);
+    CHECK(f.eccentricity <= expected + 700);
 }
 
 int main(void) {
