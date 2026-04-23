@@ -22,8 +22,24 @@ TEST(t_axis_angle_of_horizontal_bar) {
     CHECK(th > -5 && th < 5);   /* allow ±0.5° */
 }
 
+TEST(t_axis_angle_of_vertical_bar_is_in_range) {
+    /* Tall rectangle: μ₀₂ ≫ μ₂₀, μ₁₁ = 0 → principal axis vertical,
+     * θ ≈ ±π/2. Contract: theta_x10 ∈ [-900, 900). Without the clamp,
+     * a rounding change in atan2_q16 could push this to exactly +900,
+     * which is out of range. */
+    tpv_Blob b = {0};
+    b.m00 = 40; b.m10 = 80; b.m01 = 100;
+    b.mu20 = 10; b.mu02 = 200; b.mu11 = 0;
+    int16_t x, y, th;
+    tpv_pose(&b, &x, &y, &th);
+    CHECK(th >= -900 && th < 900);
+    /* And the angle should be near ±π/2 (i.e., ±900 boundary, allow ±10). */
+    CHECK((th >= 890 && th < 900) || (th >= -900 && th <= -890));
+}
+
 int main(void) {
     RUN(t_centroid_of_square);
     RUN(t_axis_angle_of_horizontal_bar);
+    RUN(t_axis_angle_of_vertical_bar_is_in_range);
     FINISH();
 }

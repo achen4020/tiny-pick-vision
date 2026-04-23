@@ -20,8 +20,14 @@ void tpv_pose(const tpv_Blob *b,
     /* Convert Q16.16 radians → degrees × 10. */
     int64_t tmp = (int64_t)theta_q16 * 1800;
     int32_t deg_x10 = (int32_t)(tmp / TPV_PI_Q16);
-    /* Normalize to [-1800, 1800). */
-    while (deg_x10 < -1800) deg_x10 += 3600;
-    while (deg_x10 >= 1800) deg_x10 -= 3600;
+    /* Normalize to [-900, 900). The principal axis is defined mod π, so the
+     * period is 1800 (= π in deg×10 units), not 3600. Rounding in atan2_q16
+     * can in principle push the +π/2 edge to 900; collapse that to -900 (same
+     * angle) so the output stays in the half-open range documented in
+     * spec §6 / §10.1. Without this clamp a legal vertical-axis blob
+     * (mu20 < mu02, mu11 = 0) sits at +π/2, whose quantization could leak
+     * across the boundary under future precision changes. */
+    while (deg_x10 >=  900) deg_x10 -= 1800;
+    while (deg_x10 <  -900) deg_x10 += 1800;
     *theta_x10_out = (int16_t)deg_x10;
 }
