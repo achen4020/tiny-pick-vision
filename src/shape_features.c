@@ -61,22 +61,57 @@ void tpv_shape_features(const tpv_Blob *b, tpv_Features *f) {
     f->perim_ratio = (int32_t)(((int64_t)b->perimeter << 32) / sqrt_area);
 
     /* Eccentricity from 2×2 covariance eigenvalues:
-     *   λ = (tr ± sqrt(tr² - 4·det)) / 2,  ecc = sqrt(1 - λmin/λmax). */
-    int64_t tr = b->mu20 + b->mu02;
-    int64_t det = b->mu20 * b->mu02 - b->mu11 * b->mu11;
-    int64_t disc = tr*tr - 4*det;
-    int64_t sdisc = disc > 0 ? tpv_isqrt_q16(disc << 16) : 0;
-    int64_t l1 = (tr + (sdisc >> 16)) / 2;
-    int64_t l2 = (tr - (sdisc >> 16)) / 2;
+     *   λ = (tr ± sqrt(tr² - 4·det)) / 2,  ecc = sqrt(1 - λmin/λmax).
+     *
+     * Within Amax = 50000, |μ₂₀| can reach ~5e9 for a dumbbell blob that
+     * spans the frame width, so tr ≈ 1e10 and tr² ≈ 1e20 — overflows int64
+     * (max 9.2e18). μ₂₀·μ₀₂ also touches int64 headroom, and disc<<16
+     * overflows even earlier.
+     *
+     * Scale all three 2nd-order moments right by k before quadratic
+     * products; eccentricity is scale-invariant (it's a ratio of
+     * eigenvalues), so any common shift cancels. Pick k so shifted
+     * magnitudes ≤ 2^22 → products ≤ 2^44, tr² ≤ 2^46, disc ≤ 2^46,
+     * and disc<<16 ≤ 2^62 — all comfortably inside int64. */
+    int64_t a20 = b->mu20 < 0 ? -b->mu20 : b->mu20;
+    int64_t a02 = b->mu02 < 0 ? -b->mu02 : b->mu02;
+    int64_t a11 = b->mu11 < 0 ? -b->mu11 : b->mu11;
+    int64_t mmax = a20 > a02 ? a20 : a02;
+    if (a11 > mmax) mmax = a11;
+    int k_shift = 0;
+    while ((mmax >> k_shift) > (1LL << 22)) k_shift++;
+
+    int64_t s20 = b->mu20 >> k_shift;
+    int64_t s02 = b->mu02 >> k_shift;
+    int64_t s11 = b->mu11 >> k_shift;
+    int64_t tr = s20 + s02;
+    int64_t det = s20 * s02 - s11 * s11;
+    int64_t disc = tr * tr - 4 * det;
+    /* tpv_isqrt_i64, not tpv_isqrt_q16: the latter internally does `x_q16 << 16`
+     * which overflows int64 for disc larger than ~2^47, which happens routinely
+     * on large blobs even after k_shift. We only need integer sqrt(disc) here;
+     * tr and sdisc are combined as plain ints in the eigenvalue formula. */
+    int64_t sdisc = disc > 0 ? tpv_isqrt_i64(disc) : 0;
+    int64_t l1 = (tr + sdisc) / 2;
+    int64_t l2 = (tr - sdisc) / 2;
     if (l1 < l2) { int64_t tmp = l1; l1 = l2; l2 = tmp; }
     if (l1 == 0) {
         f->eccentricity = 0;
     } else {
+        /* λ_min / λ_max is scale-invariant; the k_shift applied to both
+         * numerator and denominator cancels here.
+         *
+         * tpv_isqrt_q16 takes a Q16.16 input and returns Q16.16 sqrt.
+         * one_minus_ratio is already Q16.16 representing (1 − λmin/λmax) ∈
+         * [0, 1], so feed it directly — shifting it << 16 would make the
+         * routine compute sqrt of a value 65536× too large, giving an
+         * output 256× the correct eccentricity. (The pre-existing square
+         * test happened to assert 0, so this bug was latent.) */
         int64_t ratio = (l2 << 16) / l1;     /* Q16.16, ∈ [0, 1] */
         int64_t one_q16 = (int64_t)1 << 16;
         int64_t one_minus_ratio = one_q16 - ratio;
         if (one_minus_ratio < 0) one_minus_ratio = 0;
-        f->eccentricity = (int32_t)tpv_isqrt_q16(one_minus_ratio << 16);
+        f->eccentricity = (int32_t)tpv_isqrt_q16(one_minus_ratio);
     }
 
     /* m3_axis_sign: spec §7 calls for sign of μ₃ projected onto the principal
