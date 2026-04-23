@@ -8,7 +8,7 @@ STRIP     ?= llvm-strip
 CFLAGS_COMMON  = -std=c11 -Wall -Wextra -Werror -Wpedantic -Iinclude -MMD -MP
 CFLAGS_HOST    = $(CFLAGS_COMMON) -g -O0 -DTPV_HOST_BUILD -D_POSIX_C_SOURCE=200809L
 CFLAGS_TARGET  = $(CFLAGS_COMMON) -Os -flto -ffreestanding -fno-exceptions \
-                 -fno-asynchronous-unwind-tables -fomit-frame-pointer
+                 -fno-asynchronous-unwind-tables -fomit-frame-pointer -fPIC
 
 SRCS = src/threshold.c src/ccl_moments.c src/shape_features.c \
        src/classifier.c src/pose.c src/pipeline.c src/platform_glue.c \
