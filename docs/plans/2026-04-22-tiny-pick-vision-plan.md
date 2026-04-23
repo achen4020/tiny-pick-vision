@@ -645,12 +645,6 @@ Expected: link error。
 static uint16_t g_labels[TPV_WIDTH * TPV_HEIGHT];
 static uint32_t g_uf[TPV_MAX_LABELS + 1];
 
-#ifdef TPV_TEST_EXPOSE
-uint32_t uf_find(uint32_t x);
-void     uf_union(uint32_t a, uint32_t b);
-void     uf_reset(int n);
-#endif
-
 static uint32_t uf_find(uint32_t x) {
     while (g_uf[x] != x) {
         g_uf[x] = g_uf[g_uf[x]];  /* path compression */
@@ -2438,9 +2432,9 @@ baseline.csv 与新 release.csv 时**按 frame_name 列做 join**（不要按行
 
 > `build/replay` 由 `CC_HOST` 构建，**只能在 host 跑**——它的用途是
 > "同一份算法源码在 host 上对录制帧做位级回放"，目的是验证决策一致性而
-> 不是测目标板性能。目标板上的节拍验证由 §11 测试矩阵的"目标"行（在
-> ARM 上跑 `tpv_process_frame`）覆盖；长稳数据由生产二进制本身的运行
-> 日志收集，不通过 replay。
+> 不是测目标板性能。目标板上的节拍验证由 **design spec §11 测试策略**的
+> "目标"行（在 ARM 上跑 `tpv_process_frame`）覆盖；长稳数据由生产二进制
+> 本身的运行日志收集，不通过 replay。
 
 ---
 
@@ -2462,6 +2456,6 @@ baseline.csv 与新 release.csv 时**按 frame_name 列做 join**（不要按行
 下列 spec §13 中仍未与用户敲定、但不影响单元级实施：
 
 1. A2 节拍是否真的 30 ms：目标板上跑生产二进制收集每帧耗时（不是 replay——
-   它是 host 侧回归工具）；与 §11 测试矩阵"目标"行一并对照。
+   它是 host 侧回归工具）；与 **design spec §11 测试策略**"目标"行一并对照。
 2. A4 输出是 serial 还是 TCP：T7 已把序列化层独立，两种 wrapper 后续补一个 200 行内的驱动即可。
 3. 标定 UX（GUI vs CLI）：当前计划只做 CLI，GUI 若产线要求再加。
