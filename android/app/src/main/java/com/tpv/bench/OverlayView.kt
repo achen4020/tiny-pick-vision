@@ -63,6 +63,13 @@ class OverlayView @JvmOverloads constructor(
         postInvalidate()
     }
 
+    /** Called when current frame has no valid detection (TPV_EMPTY or dropped).
+     *  Clears the live circle/axis/line1 but leaves commit + flash state intact. */
+    fun clearLive() {
+        live.set(null)
+        postInvalidate()
+    }
+
     /** Called ONLY when TriggerMachine emits a Commit. */
     fun onCommit(eventClassId: Int, flicker: Boolean) {
         commit.set(CommitState(

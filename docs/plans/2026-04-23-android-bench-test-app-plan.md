@@ -741,7 +741,12 @@ Empty file — debug builds don't shrink.
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:screenOrientation="portrait">
+            android:screenOrientation="landscape">
+            <!-- Landscape-locked: the back camera buffer is 640×480 landscape,
+                 PreviewView + OverlayView use naive width/height scaling, so
+                 matching the Activity to the sensor axes avoids a rotation
+                 mismatch. Also keeps CameraX from handing back a 480×640
+                 swapped buffer that would fail tpv's 640×480 dim check. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -1648,6 +1653,33 @@ class TriggerMachineTest {
     }
 
     @Test
+    fun `N_stable=1 commits on the very first PRESENT frame`() {
+        val tm = TriggerMachine(nStable = 1, kEmpty = 5, mDriftPx = 30)
+        val out = tm.onFrame(present(2, 320, 240, 1))
+        assertTrue("first frame must commit when N=1", out is StateMachineOutput.Commit)
+        assertEquals(MachineState.COMMITTED, tm.state)
+        val ev = (out as StateMachineOutput.Commit).event
+        assertEquals(1L, ev.eventIdx)
+        assertEquals(1L, ev.triggerFrameIdx)
+        assertEquals(2, ev.eventClassId)
+        assertFalse(ev.flicker)
+        assertEquals(mapOf(2 to 1), ev.classIdHistogram)
+    }
+
+    @Test
+    fun `N_stable=1 still requires K EMPTY before next commit`() {
+        val tm = TriggerMachine(nStable = 1, kEmpty = 3, mDriftPx = 30)
+        tm.onFrame(present(2, 320, 240, 1))       // commits
+        val out2 = tm.onFrame(present(2, 320, 240, 2))
+        assertEquals(StateMachineOutput.None, out2)   // still COMMITTED
+        repeat(3) { tm.onFrame(empty((3 + it).toLong())) }
+        assertEquals(MachineState.IDLE, tm.state)
+        val out3 = tm.onFrame(present(2, 320, 240, 6))
+        assertTrue(out3 is StateMachineOutput.Commit)
+        assertEquals(2L, (out3 as StateMachineOutput.Commit).event.eventIdx)
+    }
+
+    @Test
     fun `second commit requires full cycle back to IDLE`() {
         val tm = TriggerMachine(3, 5, 30)
         repeat(3) { tm.onFrame(present(2, 320, 240, (it + 1).toLong())) }
@@ -1766,12 +1798,14 @@ class TriggerMachine(
     }
 
     private fun handleIdle(obs: FrameObservation): StateMachineOutput {
-        if (obs.presence == FramePresence.PRESENT) {
-            window.clear()
-            window.add(obs)
-            state = MachineState.CANDIDATE
-        }
-        return StateMachineOutput.None
+        if (obs.presence != FramePresence.PRESENT) return StateMachineOutput.None
+        window.clear()
+        window.add(obs)
+        state = MachineState.CANDIDATE
+        // Promote on this same frame when nStable == 1 — SettingsState allows
+        // N=1 and spec §4.2 says the window size alone decides. Refactored
+        // into checkPromote() so both handleIdle and handleCandidate share it.
+        return checkPromote()
     }
 
     private fun handleCandidate(obs: FrameObservation): StateMachineOutput {
@@ -1787,14 +1821,19 @@ class TriggerMachine(
             return StateMachineOutput.None
         }
         window.add(obs)
-        if (window.size >= nStable) {
-            val event = buildCommit()
-            state = MachineState.COMMITTED
-            emptyCount = 0
-            window.clear()
-            return StateMachineOutput.Commit(event)
-        }
-        return StateMachineOutput.None
+        return checkPromote()
+    }
+
+    /** Promote to COMMITTED once the window has accumulated N_stable
+     *  PRESENT frames. Shared between handleIdle (covers N=1) and
+     *  handleCandidate (covers N>=2). */
+    private fun checkPromote(): StateMachineOutput {
+        if (window.size < nStable) return StateMachineOutput.None
+        val event = buildCommit()
+        state = MachineState.COMMITTED
+        emptyCount = 0
+        window.clear()
+        return StateMachineOutput.Commit(event)
     }
 
     private fun handleCommitted(obs: FrameObservation): StateMachineOutput {
@@ -2577,6 +2616,13 @@ class OverlayView @JvmOverloads constructor(
         postInvalidate()
     }
 
+    /** Called when current frame has no valid detection (TPV_EMPTY or dropped).
+     *  Clears the live circle/axis/line1 but leaves commit + flash state intact. */
+    fun clearLive() {
+        live.set(null)
+        postInvalidate()
+    }
+
     /** Called ONLY when TriggerMachine emits a Commit. */
     fun onCommit(eventClassId: Int, flicker: Boolean) {
         commit.set(CommitState(
@@ -2835,6 +2881,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Binds a back-facing camera via CameraX and hands every YUV_420_888 frame
@@ -2853,14 +2900,20 @@ class CameraAdapter(private val ctx: Context) {
     var nativeH = 0 ; private set
 
     private var provider: ProcessCameraProvider? = null
+    /** Latched true by stop(); start() resets to false. Listener bails if set
+     *  before bind, so a Stop clicked during async provider init doesn't leave
+     *  the camera running after the UI has returned to "stopped". */
+    private val cancelled = AtomicBoolean(false)
 
     fun start(
         lifecycleOwner: LifecycleOwner,
         previewView: PreviewView,
         onFrame: (proxy: ImageProxy) -> Unit,
     ) {
+        cancelled.set(false)
         val fut = ProcessCameraProvider.getInstance(ctx)
         fut.addListener({
+            if (cancelled.get()) return@addListener   // stop() beat us here
             val p = fut.get()
             provider = p
             val preview = Preview.Builder().build().also {
@@ -2885,6 +2938,7 @@ class CameraAdapter(private val ctx: Context) {
     }
 
     fun stop() {
+        cancelled.set(true)
         provider?.unbindAll()
         provider = null
     }
@@ -3190,8 +3244,16 @@ class MainActivity : AppCompatActivity() {
             overlay.onCommit(out.event.eventClassId, out.event.flicker)
         }
 
-        overlay.updateLive(result, adapted.crop, nativeW, nativeH)
-        updateHud(result)
+        // Only paint a live marker on PRESENT frames. On TPV_EMPTY /
+        // SCENE_ERROR / BAD_INPUT the C side zero-fills det, so rendering
+        // would otherwise draw a bogus (0,0) class-0 circle. clearLive()
+        // drops only the live layer — commit state + 300 ms flash survive.
+        if (presence == FramePresence.PRESENT) {
+            overlay.updateLive(result, adapted.crop, nativeW, nativeH)
+        } else {
+            overlay.clearLive()
+        }
+        updateHud(result, presence)
     }
 
     /**
@@ -3256,7 +3318,7 @@ class MainActivity : AppCompatActivity() {
      * persist across frames that aren't themselves commits — per spec §9
      * "最近一次 COMMITTED 事件的摘要".
      */
-    private fun updateHud(live: TpvDetectionDebug) {
+    private fun updateHud(live: TpvDetectionDebug, presence: FramePresence) {
         val now = System.nanoTime()
         fpsWin.addLast(now)
         while (fpsWin.size > fpsWindowSize) fpsWin.removeFirst()
@@ -3277,7 +3339,13 @@ class MainActivity : AppCompatActivity() {
                        "  x=${d.det.x} y=${d.det.y} θ=${d.det.thetaX10/10.0}")
             } else {
                 append("Last (no committed event yet)\n")
-                append("Live ${OverlayPainter.textLine1(live)}")
+                // Fallback line: on EMPTY/DROP the `live` struct is zero-filled,
+                // so textLine1(live) would print misleading det_cls=0 conf=0.
+                if (presence == FramePresence.PRESENT) {
+                    append("Live ${OverlayPainter.textLine1(live)}")
+                } else {
+                    append("Live (nothing in view)")
+                }
             }
         }
         runOnUiThread { hud.text = msg }

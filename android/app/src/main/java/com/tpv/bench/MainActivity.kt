@@ -287,8 +287,16 @@ class MainActivity : AppCompatActivity() {
             overlay.onCommit(out.event.eventClassId, out.event.flicker)
         }
 
-        overlay.updateLive(result, adapted.crop, nativeW, nativeH)
-        updateHud(result)
+        // Only paint a live marker on PRESENT frames. On TPV_EMPTY /
+        // SCENE_ERROR / BAD_INPUT the C side zero-fills det, so rendering
+        // would otherwise draw a bogus (0,0) class-0 circle. clearLive()
+        // drops only the live layer — commit state + 300 ms flash survive.
+        if (presence == FramePresence.PRESENT) {
+            overlay.updateLive(result, adapted.crop, nativeW, nativeH)
+        } else {
+            overlay.clearLive()
+        }
+        updateHud(result, presence)
     }
 
     /**
@@ -353,7 +361,7 @@ class MainActivity : AppCompatActivity() {
      * persist across frames that aren't themselves commits — per spec §9
      * "最近一次 COMMITTED 事件的摘要".
      */
-    private fun updateHud(live: TpvDetectionDebug) {
+    private fun updateHud(live: TpvDetectionDebug, presence: FramePresence) {
         val now = System.nanoTime()
         fpsWin.addLast(now)
         while (fpsWin.size > fpsWindowSize) fpsWin.removeFirst()
@@ -374,7 +382,13 @@ class MainActivity : AppCompatActivity() {
                        "  x=${d.det.x} y=${d.det.y} θ=${d.det.thetaX10/10.0}")
             } else {
                 append("Last (no committed event yet)\n")
-                append("Live ${OverlayPainter.textLine1(live)}")
+                // Fallback line: on EMPTY/DROP the `live` struct is zero-filled,
+                // so textLine1(live) would print misleading det_cls=0 conf=0.
+                if (presence == FramePresence.PRESENT) {
+                    append("Live ${OverlayPainter.textLine1(live)}")
+                } else {
+                    append("Live (nothing in view)")
+                }
             }
         }
         runOnUiThread { hud.text = msg }

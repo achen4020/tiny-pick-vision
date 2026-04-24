@@ -167,6 +167,33 @@ class TriggerMachineTest {
     }
 
     @Test
+    fun `N_stable=1 commits on the very first PRESENT frame`() {
+        val tm = TriggerMachine(nStable = 1, kEmpty = 5, mDriftPx = 30)
+        val out = tm.onFrame(present(2, 320, 240, 1))
+        assertTrue("first frame must commit when N=1", out is StateMachineOutput.Commit)
+        assertEquals(MachineState.COMMITTED, tm.state)
+        val ev = (out as StateMachineOutput.Commit).event
+        assertEquals(1L, ev.eventIdx)
+        assertEquals(1L, ev.triggerFrameIdx)
+        assertEquals(2, ev.eventClassId)
+        assertFalse(ev.flicker)
+        assertEquals(mapOf(2 to 1), ev.classIdHistogram)
+    }
+
+    @Test
+    fun `N_stable=1 still requires K EMPTY before next commit`() {
+        val tm = TriggerMachine(nStable = 1, kEmpty = 3, mDriftPx = 30)
+        tm.onFrame(present(2, 320, 240, 1))       // commits
+        val out2 = tm.onFrame(present(2, 320, 240, 2))
+        assertEquals(StateMachineOutput.None, out2)   // still COMMITTED
+        repeat(3) { tm.onFrame(empty((3 + it).toLong())) }
+        assertEquals(MachineState.IDLE, tm.state)
+        val out3 = tm.onFrame(present(2, 320, 240, 6))
+        assertTrue(out3 is StateMachineOutput.Commit)
+        assertEquals(2L, (out3 as StateMachineOutput.Commit).event.eventIdx)
+    }
+
+    @Test
     fun `second commit requires full cycle back to IDLE`() {
         val tm = TriggerMachine(3, 5, 30)
         repeat(3) { tm.onFrame(present(2, 320, 240, (it + 1).toLong())) }

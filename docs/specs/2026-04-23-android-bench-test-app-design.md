@@ -534,6 +534,8 @@ android-apk: android-so
 
 **权限**：首次 Start 时请求 `CAMERA`。拒绝后 Start 按钮常灰，顶部红色文字提示"需要相机权限，请在系统设置里开启"。
 
+**屏幕方向（landscape-only）**：`MainActivity` 在 `AndroidManifest.xml` 里锁死 `android:screenOrientation="landscape"`。背摄像头 buffer 原生是 640×480 landscape，`PreviewView` 与 `OverlayView` 用直接的 `width / nativeW`、`height / nativeH` 线性缩放（见 §5.5 / §8.4）。Activity 若为 portrait，CameraX 会把 buffer 旋转 90°/270° 显示，而 Overlay 仍按 buffer 坐标绘制，圆圈 / 轴会跑到错误位置；同时 portrait 下 `setTargetResolution(Size(640, 480))` 有可能被解释为 480×640 返回，触发 tpv 的 `TPV_BAD_INPUT`。本 spec 不要求 portrait，锁 landscape 是最简单且正确的方案。
+
 ---
 
 ## 10. 存储与运维

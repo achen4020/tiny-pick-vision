@@ -11,6 +11,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Binds a back-facing camera via CameraX and hands every YUV_420_888 frame
@@ -29,14 +30,20 @@ class CameraAdapter(private val ctx: Context) {
     var nativeH = 0 ; private set
 
     private var provider: ProcessCameraProvider? = null
+    /** Latched true by stop(); start() resets to false. Listener bails if set
+     *  before bind, so a Stop clicked during async provider init doesn't leave
+     *  the camera running after the UI has returned to "stopped". */
+    private val cancelled = AtomicBoolean(false)
 
     fun start(
         lifecycleOwner: LifecycleOwner,
         previewView: PreviewView,
         onFrame: (proxy: ImageProxy) -> Unit,
     ) {
+        cancelled.set(false)
         val fut = ProcessCameraProvider.getInstance(ctx)
         fut.addListener({
+            if (cancelled.get()) return@addListener   // stop() beat us here
             val p = fut.get()
             provider = p
             val preview = Preview.Builder().build().also {
@@ -61,6 +68,7 @@ class CameraAdapter(private val ctx: Context) {
     }
 
     fun stop() {
+        cancelled.set(true)
         provider?.unbindAll()
         provider = null
     }

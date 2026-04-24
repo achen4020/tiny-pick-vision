@@ -60,12 +60,14 @@ class TriggerMachine(
     }
 
     private fun handleIdle(obs: FrameObservation): StateMachineOutput {
-        if (obs.presence == FramePresence.PRESENT) {
-            window.clear()
-            window.add(obs)
-            state = MachineState.CANDIDATE
-        }
-        return StateMachineOutput.None
+        if (obs.presence != FramePresence.PRESENT) return StateMachineOutput.None
+        window.clear()
+        window.add(obs)
+        state = MachineState.CANDIDATE
+        // Promote on this same frame when nStable == 1 — SettingsState allows
+        // N=1 and spec §4.2 says the window size alone decides. Refactored
+        // into checkPromote() so both handleIdle and handleCandidate share it.
+        return checkPromote()
     }
 
     private fun handleCandidate(obs: FrameObservation): StateMachineOutput {
@@ -81,14 +83,19 @@ class TriggerMachine(
             return StateMachineOutput.None
         }
         window.add(obs)
-        if (window.size >= nStable) {
-            val event = buildCommit()
-            state = MachineState.COMMITTED
-            emptyCount = 0
-            window.clear()
-            return StateMachineOutput.Commit(event)
-        }
-        return StateMachineOutput.None
+        return checkPromote()
+    }
+
+    /** Promote to COMMITTED once the window has accumulated N_stable
+     *  PRESENT frames. Shared between handleIdle (covers N=1) and
+     *  handleCandidate (covers N>=2). */
+    private fun checkPromote(): StateMachineOutput {
+        if (window.size < nStable) return StateMachineOutput.None
+        val event = buildCommit()
+        state = MachineState.COMMITTED
+        emptyCount = 0
+        window.clear()
+        return StateMachineOutput.Commit(event)
     }
 
     private fun handleCommitted(obs: FrameObservation): StateMachineOutput {

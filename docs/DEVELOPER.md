@@ -332,6 +332,13 @@ Grant the CAMERA permission, tap Start, place objects in front of the
 back camera one at a time. HUD shows state, FPS, event count. Tap Stop —
 toast shows the zip filename.
 
+The Activity is locked to **landscape** orientation. The back camera
+buffer is 640×480 landscape and `OverlayView` uses direct
+`width / nativeW` / `height / nativeH` scaling, so aligning the Activity
+to the sensor axes avoids a rotation mismatch. CameraX also returns a
+clean 640×480 buffer in landscape rather than a swapped 480×640 that
+would trip tpv's dimension check.
+
 ### Retrieve a run
 
 ```bash
