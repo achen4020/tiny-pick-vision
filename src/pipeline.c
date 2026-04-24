@@ -199,10 +199,16 @@ int tpv_process_frame_debug_v2(
 {
     if (!out) return TPV_BAD_INPUT;
     memset(out, 0, sizeof *out);
+    dark_object_mode = !!dark_object_mode;   /* normalize to 0 or 1 */
 
     if (!y || w != TPV_WIDTH || h != TPV_HEIGHT) return TPV_BAD_INPUT;
+    /* Overflow-safe ROI bounds check: since roi_x >= 0 and roi_w >= 1 are
+     * already guaranteed by the preceding clause, (w - roi_x) cannot
+     * underflow; writing the bound as `roi_w > w - roi_x` avoids the
+     * signed-int-overflow hazard of `roi_x + roi_w` for pathological
+     * roi_w near INT_MAX. Same reasoning for h. */
     if (roi_x < 0 || roi_y < 0 || roi_w <= 0 || roi_h <= 0 ||
-        roi_x + roi_w > w || roi_y + roi_h > h) return TPV_BAD_INPUT;
+        roi_w > w - roi_x || roi_h > h - roi_y) return TPV_BAD_INPUT;
 
     /* 1. threshold_v2 with runtime params (NOT tpv_bin_threshold global) */
     threshold_v2(y, w, h, bin_threshold, dark_object_mode, out->bin);
@@ -237,6 +243,13 @@ int tpv_process_frame_debug_v2(
     static tpv_Features  feat_pool[TPV_MAX_BLOBS];
     static int           blob_idx_pool[TPV_MAX_BLOBS];
     int pn = 0;
+    /* NOTE: the per-blob filter/classify/pose/argmax loop below duplicates
+     * the same logic in tpv_process_frame (src/pipeline.c:~22-58). Any
+     * change to the production selection policy (AMIN/AMAX bounds, argmax
+     * tie-break, classifier args, etc.) MUST be mirrored in both places.
+     * A cleaner refactor into a shared static helper is left for v3 — v1
+     * function re-thresholds from scratch, so extracting a true common
+     * helper would require larger restructuring. */
     for (int i = 0; i < n; i++) {
         if (blobs[i].m00 < TPV_AMIN || blobs[i].m00 > TPV_AMAX) continue;
         tpv_Features f;

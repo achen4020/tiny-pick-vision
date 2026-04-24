@@ -86,6 +86,15 @@ typedef struct {
     tpv_Features  features;
     int32_t       distances_sq[TPV_N_CLASSES];
 
+    /* bbox_x1, bbox_y1 are INCLUSIVE endpoints — same convention as tpv_Blob
+     * (verified in src/ccl_moments.c: bbox is grown via `x > bbox_x1` on
+     * actual pixel coords at ~line 111, and Pass 3 iterates `x <= bbox_x1`
+     * at ~line 149, i.e. a closed interval).
+     * JNI layer in tpv_jni.c must convert to (x, y, w, h) for Kotlin TpvBbox:
+     *    x = bbox_x0
+     *    y = bbox_y0
+     *    w = bbox_x1 - bbox_x0 + 1
+     *    h = bbox_y1 - bbox_y0 + 1 */
     int16_t  bbox_x0, bbox_y0, bbox_x1, bbox_y1;
     int32_t  area_px;
     int32_t  grid_8x8;

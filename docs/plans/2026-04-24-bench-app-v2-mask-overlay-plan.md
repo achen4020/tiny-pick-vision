@@ -831,12 +831,16 @@ Java_com_tpv_bench_TpvNative_processFrameDebugV2(
     (*env)->SetIntArrayRegion(env, dsq, 0, TPV_N_CLASSES,
         (const jint *)s_v2_out.distances_sq);
 
-    /* v2-only objects */
+    /* v2-only objects.
+     * bbox_{x1,y1} are INCLUSIVE endpoints (closed interval, matches
+     * tpv_Blob convention — see include/tpv_internal.h above
+     * tpv_DetectionDebugV2.bbox_x0 and src/ccl_moments.c ~line 149 Pass 3
+     * `x <= bbox_x1` iteration), so convert to (w, h) with +1. */
     jobject bbox_obj = (*env)->NewObject(env, s_cache_v2.bbox_cls, s_cache_v2.bbox_ctor,
         (jint)s_v2_out.bbox_x0,
         (jint)s_v2_out.bbox_y0,
-        (jint)(s_v2_out.bbox_x1 - s_v2_out.bbox_x0),
-        (jint)(s_v2_out.bbox_y1 - s_v2_out.bbox_y0));
+        (jint)(s_v2_out.bbox_x1 - s_v2_out.bbox_x0 + 1),
+        (jint)(s_v2_out.bbox_y1 - s_v2_out.bbox_y0 + 1));
 
     const jsize MASK_LEN = TPV_WIDTH * TPV_HEIGHT / 8;
     jbyteArray bin_arr = (*env)->NewByteArray(env, MASK_LEN);
