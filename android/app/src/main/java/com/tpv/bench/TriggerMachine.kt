@@ -1,0 +1,143 @@
+package com.tpv.bench
+
+enum class FramePresence { PRESENT, EMPTY, DROP }
+
+data class FrameObservation(
+    val presence: FramePresence,
+    val x: Int, val y: Int,
+    val classId: Int,
+    val frameIdxInRun: Long,
+    val detection: TpvDetectionDebug?
+)
+
+enum class MachineState { IDLE, CANDIDATE, COMMITTED }
+
+sealed class StateMachineOutput {
+    object None : StateMachineOutput()
+    data class Commit(val event: CommittedEvent) : StateMachineOutput()
+}
+
+data class CommittedEvent(
+    val eventIdx: Long,
+    val triggerFrameIdx: Long,
+    val triggerFrameDebug: TpvDetectionDebug,
+    val eventClassId: Int,
+    val classIdHistogram: Map<Int, Int>,
+    val flicker: Boolean,
+)
+
+class TriggerMachine(
+    private val nStable: Int,
+    private val kEmpty: Int,
+    private val mDriftPx: Int,
+) {
+    init {
+        require(nStable >= 1) { "nStable must be ≥ 1" }
+        require(kEmpty  >= 1) { "kEmpty must be ≥ 1" }
+        require(mDriftPx >= 0) { "mDriftPx must be ≥ 0" }
+    }
+
+    var state: MachineState = MachineState.IDLE ; private set
+
+    // Window of accumulated PRESENT observations during CANDIDATE.
+    // window[0] = first frame (used as position anchor per §4.2).
+    private val window = ArrayList<FrameObservation>(nStable)
+    private var emptyCount = 0
+    private var nextEventIdx = 1L
+
+    fun onFrame(obs: FrameObservation): StateMachineOutput {
+        // DROP frames are never passed to the state machine per spec §4.2
+        // ("frame dropped, does not advance state, does not enter window").
+        if (obs.presence == FramePresence.DROP) return StateMachineOutput.None
+
+        return when (state) {
+            MachineState.IDLE      -> handleIdle(obs)
+            MachineState.CANDIDATE -> handleCandidate(obs)
+            MachineState.COMMITTED -> handleCommitted(obs)
+        }
+    }
+
+    private fun handleIdle(obs: FrameObservation): StateMachineOutput {
+        if (obs.presence == FramePresence.PRESENT) {
+            window.clear()
+            window.add(obs)
+            state = MachineState.CANDIDATE
+        }
+        return StateMachineOutput.None
+    }
+
+    private fun handleCandidate(obs: FrameObservation): StateMachineOutput {
+        if (obs.presence == FramePresence.EMPTY) {
+            reset()
+            return StateMachineOutput.None
+        }
+        // PRESENT: check position stability against window[0]
+        val first = window[0]
+        if (kotlin.math.abs(obs.x - first.x) > mDriftPx ||
+            kotlin.math.abs(obs.y - first.y) > mDriftPx) {
+            reset()
+            return StateMachineOutput.None
+        }
+        window.add(obs)
+        if (window.size >= nStable) {
+            val event = buildCommit()
+            state = MachineState.COMMITTED
+            emptyCount = 0
+            window.clear()
+            return StateMachineOutput.Commit(event)
+        }
+        return StateMachineOutput.None
+    }
+
+    private fun handleCommitted(obs: FrameObservation): StateMachineOutput {
+        if (obs.presence == FramePresence.EMPTY) {
+            emptyCount += 1
+            if (emptyCount >= kEmpty) {
+                state = MachineState.IDLE
+                emptyCount = 0
+            }
+        } else {
+            // PRESENT (DROP already filtered above)
+            emptyCount = 0
+        }
+        return StateMachineOutput.None
+    }
+
+    private fun reset() {
+        window.clear()
+        state = MachineState.IDLE
+    }
+
+    private fun buildCommit(): CommittedEvent {
+        val nth = window.last()                // window[nStable-1]
+        val histogram = HashMap<Int, Int>()
+        for (f in window) histogram[f.classId] = (histogram[f.classId] ?: 0) + 1
+
+        // Majority vote with tie-break: real classes (0..4) > AMBIGUOUS (0xFE) > REJECTED (0xFF)
+        val eventClass = histogram.entries
+            .sortedWith(
+                compareByDescending<Map.Entry<Int, Int>> { it.value }
+                    .thenBy { classPriority(it.key) }
+            )
+            .first().key
+
+        val ev = CommittedEvent(
+            eventIdx = nextEventIdx,
+            triggerFrameIdx = nth.frameIdxInRun,
+            triggerFrameDebug = nth.detection!!,
+            eventClassId = eventClass,
+            classIdHistogram = histogram.toMap(),
+            flicker = histogram.size >= 2,
+        )
+        nextEventIdx += 1
+        return ev
+    }
+
+    /** Lower value wins the tie-break. */
+    private fun classPriority(classId: Int) = when {
+        classId in 0..4 -> 0
+        classId == 0xFE -> 1
+        classId == 0xFF -> 2
+        else -> 3
+    }
+}
