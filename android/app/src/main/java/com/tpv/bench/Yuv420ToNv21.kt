@@ -12,6 +12,9 @@ import androidx.camera.core.ImageProxy
 object Yuv420ToNv21 {
     fun convert(proxy: ImageProxy): ByteArray {
         val w = proxy.width ; val h = proxy.height
+        require(w % 2 == 0 && h % 2 == 0) {
+            "Yuv420ToNv21 requires even dimensions; got ${w}x${h}"
+        }
         val out = ByteArray(w * h * 3 / 2)
 
         // --- Y plane (top of NV21) ---

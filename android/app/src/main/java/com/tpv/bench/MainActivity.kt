@@ -13,7 +13,6 @@ import android.graphics.YuvImage
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
-import android.view.LayoutInflater
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -82,6 +81,12 @@ class MainActivity : AppCompatActivity() {
 
     @Volatile private var lastZip: File? = null
 
+    // Pre-computed in onStartClicked (UI thread) so the first onFrame()
+    // callback isn't taxed with ~10ms of file+hash work — that pollutes
+    // A2 timing and can trip the skipped-gap estimator on the first frame.
+    @Volatile private var soSha256: String = ""
+    @Volatile private var modelSha256: String = ""
+
     private val cameraPermLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (!granted) toast("Camera permission required") else onStartClicked()
@@ -128,6 +133,12 @@ class MainActivity : AppCompatActivity() {
         val snapshotSettings = SettingsSnapshot(
             settings.nStable, settings.kEmpty, settings.mDriftPx
         )
+
+        // Pre-compute once on UI thread so the first frame callback is fast.
+        soSha256 = sha256Of(File(applicationInfo.nativeLibraryDir, "libtpv.so").readBytes())
+        modelSha256 = try {
+            assets.open("tpv_model_sha.txt").bufferedReader().readText().trim()
+        } catch (e: Exception) { "unknown" }
 
         pendingInit.set { nativeW, nativeH, crop ->
             val meta = buildMeta(runId, snapshotSettings, nativeW, nativeH, crop)
@@ -200,7 +211,7 @@ class MainActivity : AppCompatActivity() {
             if (recentGaps.size >= 5) {
                 val sorted = recentGaps.toLongArray().sortedArray()
                 val median = sorted[sorted.size / 2]
-                if (median > 0 && gap > median * 3 / 2) {
+                if (median > 0 && gap > median * SKIP_GAP_RATIO_NUM / SKIP_GAP_RATIO_DEN) {
                     val missed = (gap + median / 2) / median - 1
                     if (missed > 0) skippedCount.addAndGet(missed)
                 }
@@ -371,7 +382,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun showSettingsDialog() {
         if (running.get()) { toast("Stop the run before changing settings") ; return }
-        LayoutInflater.from(this).inflate(android.R.layout.simple_list_item_1, null)
         val ll = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL ; setPadding(32, 16, 32, 16)
         }
@@ -398,17 +408,12 @@ class MainActivity : AppCompatActivity() {
         runId: String, s: SettingsSnapshot,
         nativeW: Int, nativeH: Int, crop: YuvAdapter.CropRect,
     ): MetaInfo {
-        val soFile = File(applicationInfo.nativeLibraryDir, "libtpv.so")
-        val soSha = sha256Of(soFile.readBytes())
-        val modelSha = try {
-            assets.open("tpv_model_sha.txt").bufferedReader().readText().trim()
-        } catch (e: Exception) { "unknown" }
         return MetaInfo(
             runId = runId,
             deviceModel = Build.MODEL, androidLevel = Build.VERSION.SDK_INT,
             abi = Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown",
             cpuMaxFreqKhz = readMaxCpuFreqKhz(),
-            soSha256 = soSha, modelDataSha256 = modelSha,
+            soSha256 = soSha256, modelDataSha256 = modelSha256,  // pre-computed
             nClasses = TpvNative.nClasses(), binThreshold = TpvNative.binThreshold(),
             nStable = s.n, kEmpty = s.k, mDriftPx = s.m,
             requestedW = 640, requestedH = 480,
@@ -432,5 +437,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 
-    companion object { private const val TAG = "TpvBench" }
+    companion object {
+        private const val TAG = "TpvBench"
+        // Skipped-frame detection: a gap > SKIP_GAP_RATIO × median triggers
+        // a "missed frames" estimate. 1.5× is a bench-test heuristic; tune if
+        // skipped counts look off in field data.
+        private const val SKIP_GAP_RATIO_NUM = 3
+        private const val SKIP_GAP_RATIO_DEN = 2
+    }
 }
