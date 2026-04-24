@@ -997,9 +997,16 @@ object TpvNative {
 #define LOG_TAG "tpv_jni"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-/* Single-threaded camera callback path, so a static buffer is safe and
- * avoids per-frame allocation. Sized for 640×480 + some slack. */
+/* Single-threaded camera callback path (spec §3), so a static buffer is
+ * safe and avoids per-frame allocation. Sized exactly for the 640×480
+ * packed-Y payload tpv requires; larger inputs are rejected in
+ * processFrameDebug's bounds check. */
 static uint8_t s_frame_buf[640 * 480];
+
+static void throw_illegal_state(JNIEnv *env, const char *msg) {
+    jclass cls = (*env)->FindClass(env, "java/lang/IllegalStateException");
+    if (cls) (*env)->ThrowNew(env, cls, msg);
+}
 
 /* Cached class + method IDs, looked up once from the first invocation so we
  * don't pay reflection cost per frame. */
@@ -1032,6 +1039,10 @@ static int init_cache(JNIEnv *env) {
         "(Lcom/tpv/bench/TpvDetection;Lcom/tpv/bench/TpvFeatures;[I)V");
     if (!s_cache.det_ctor || !s_cache.feat_ctor || !s_cache.dbg_ctor) {
         LOGE("GetMethodID failed");
+        (*env)->DeleteGlobalRef(env, s_cache.det_cls);
+        (*env)->DeleteGlobalRef(env, s_cache.feat_cls);
+        (*env)->DeleteGlobalRef(env, s_cache.dbg_cls);
+        s_cache.det_cls = s_cache.feat_cls = s_cache.dbg_cls = NULL;
         return -1;
     }
     s_cache.initialized = 1;
@@ -1050,11 +1061,15 @@ Java_com_tpv_bench_TpvNative_processFrameDebug(
         jlongArray out_timing_ns) {
     jlong t_jni_enter = monotonic_ns();
 
-    if (init_cache(env) < 0) return NULL;
+    if (init_cache(env) < 0) {
+        throw_illegal_state(env, "tpv_jni: init_cache failed (FindClass/GetMethodID)");
+        return NULL;
+    }
 
     const jsize n = (jsize)(w * h);
     if (n <= 0 || n > (jsize)sizeof s_frame_buf) {
         LOGE("Y buffer size %d out of bounds", n);
+        throw_illegal_state(env, "tpv_jni: Y buffer size out of bounds (expect 640x480)");
         return NULL;
     }
 
