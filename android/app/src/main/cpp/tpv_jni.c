@@ -97,8 +97,13 @@ static int init_cache_v2(JNIEnv *env) {
         "II"
         "[B[B[B)V");
 
+    if (!s_cache_v2.bbox_ctor) {
+        LOGE("GetMethodID v2 failed: TpvBbox.<init>(IIII)V not found");
+    }
+    if (!s_cache_v2.dbg_v2_ctor) {
+        LOGE("GetMethodID v2 failed: TpvDetectionDebugV2.<init>(Lcom/tpv/bench/TpvDetection;Lcom/tpv/bench/TpvFeatures;[ILcom/tpv/bench/TpvBbox;II[B[B[B)V not found");
+    }
     if (!s_cache_v2.bbox_ctor || !s_cache_v2.dbg_v2_ctor) {
-        LOGE("GetMethodID v2 failed");
         (*env)->DeleteGlobalRef(env, s_cache_v2.bbox_cls);
         (*env)->DeleteGlobalRef(env, s_cache_v2.dbg_v2_cls);
         s_cache_v2.bbox_cls = s_cache_v2.dbg_v2_cls = NULL;
@@ -200,9 +205,27 @@ Java_com_tpv_bench_TpvNative_processFrameDebugV2(
         throw_illegal_state(env, "tpv_jni: Y buffer size out of bounds");
         return NULL;
     }
+
+    if (bin_threshold < 0 || bin_threshold > 255) {
+        throw_illegal_state(env, "tpv_jni: bin_threshold out of [0,255]");
+        return NULL;
+    }
+    if (roi_x < 0 || roi_y < 0 || roi_w <= 0 || roi_h <= 0 ||
+        roi_w > w - roi_x || roi_h > h - roi_y) {
+        throw_illegal_state(env, "tpv_jni: ROI out of frame bounds");
+        return NULL;
+    }
+
     (*env)->GetByteArrayRegion(env, y, 0, n, (jbyte *)s_frame_buf);
 
     jlong t_tpv_enter = monotonic_ns();
+    /* s_v2_out is a module-static, so the &s_v2_out here is never NULL.
+     * tpv_process_frame_debug_v2's early `if (!out) return TPV_BAD_INPUT;`
+     * branch is unreachable from this call site — all other non-OK paths
+     * (BAD_INPUT via roi validation / SCENE_ERROR / EMPTY) do memset(out, 0)
+     * before returning, so s_v2_out contains deterministic zeros on any
+     * non-OK rc. Do not change this call to pass a nullable pointer
+     * without also revisiting the stale-mask risk. */
     int rc = tpv_process_frame_debug_v2(
         s_frame_buf, w, h,
         (uint8_t)(bin_threshold & 0xFF),
@@ -216,23 +239,32 @@ Java_com_tpv_bench_TpvNative_processFrameDebugV2(
 
     (void)rc;  /* caller inspects det.status (== rc) */
 
-    /* Build v1 det + features + distances objects (reuse v1 cache) */
+    /* Build v1 det + features + distances objects (reuse v1 cache).
+     * Every JNI allocation below can return NULL with a pending exception
+     * (OOM / class-not-found). Per JNI spec, passing NULL to subsequent
+     * SetXxxArrayRegion / NewObject calls is undefined behavior, so we
+     * bail out early on each failure — the pending exception propagates
+     * cleanly to Kotlin. */
     jobject det_obj = (*env)->NewObject(env, s_cache.det_cls, s_cache.det_ctor,
         (jint)rc,
         (jint)(uint32_t)s_v2_out.det.class_id,
         (jint)s_v2_out.det.x, (jint)s_v2_out.det.y,
         (jint)s_v2_out.det.theta_x10,
         (jint)(uint32_t)s_v2_out.det.confidence_q8);
+    if (!det_obj) return NULL;
 
     jintArray hu = (*env)->NewIntArray(env, 7);
+    if (!hu) return NULL;
     (*env)->SetIntArrayRegion(env, hu, 0, 7, (const jint *)s_v2_out.features.hu);
     jobject feat_obj = (*env)->NewObject(env, s_cache.feat_cls, s_cache.feat_ctor,
         hu,
         (jint)s_v2_out.features.perim_ratio,
         (jint)s_v2_out.features.eccentricity,
         (jint)s_v2_out.features.m3_axis_sign);
+    if (!feat_obj) return NULL;
 
     jintArray dsq = (*env)->NewIntArray(env, TPV_N_CLASSES);
+    if (!dsq) return NULL;
     (*env)->SetIntArrayRegion(env, dsq, 0, TPV_N_CLASSES,
         (const jint *)s_v2_out.distances_sq);
 
@@ -246,13 +278,22 @@ Java_com_tpv_bench_TpvNative_processFrameDebugV2(
         (jint)s_v2_out.bbox_y0,
         (jint)(s_v2_out.bbox_x1 - s_v2_out.bbox_x0 + 1),
         (jint)(s_v2_out.bbox_y1 - s_v2_out.bbox_y0 + 1));
+    if (!bbox_obj) return NULL;
 
+    /* TODO(v2.4 perf): 3 × 38400 B NewByteArray + SetByteArrayRegion per
+     * frame = ~115 KB/frame Java heap allocation. At ~24 fps this is
+     * 2.8 MB/s GC pressure. If Overlay draw introduces stutter, switch to
+     * Kotlin-owned preallocated ByteArray passed INTO this JNI call and
+     * filled via SetByteArrayRegion, eliminating the allocation. */
     const jsize MASK_LEN = TPV_WIDTH * TPV_HEIGHT / 8;
     jbyteArray bin_arr = (*env)->NewByteArray(env, MASK_LEN);
+    if (!bin_arr) return NULL;
     (*env)->SetByteArrayRegion(env, bin_arr, 0, MASK_LEN, (const jbyte *)s_v2_out.bin);
     jbyteArray all_arr = (*env)->NewByteArray(env, MASK_LEN);
+    if (!all_arr) return NULL;
     (*env)->SetByteArrayRegion(env, all_arr, 0, MASK_LEN, (const jbyte *)s_v2_out.all_blobs_mask);
     jbyteArray mask_arr = (*env)->NewByteArray(env, MASK_LEN);
+    if (!mask_arr) return NULL;
     (*env)->SetByteArrayRegion(env, mask_arr, 0, MASK_LEN, (const jbyte *)s_v2_out.mask);
 
     return (*env)->NewObject(env, s_cache_v2.dbg_v2_cls, s_cache_v2.dbg_v2_ctor,
