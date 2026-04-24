@@ -76,13 +76,13 @@ TEST(t_translation_invariance_features) {
 
     render_square_at(y_buf, 100, 100);
     tpv_threshold(y_buf, TPV_WIDTH, TPV_HEIGHT, bin_buf);
-    int n = tpv_ccl_moments(bin_buf, TPV_WIDTH, TPV_HEIGHT, blobs_buf, 4);
+    int n = tpv_ccl_moments(bin_buf, TPV_WIDTH, TPV_HEIGHT, blobs_buf, 4, NULL);
     CHECK_EQ_I(n, 1);
     tpv_shape_features(&blobs_buf[0], &f1);
 
     render_square_at(y_buf, 500, 400);
     tpv_threshold(y_buf, TPV_WIDTH, TPV_HEIGHT, bin_buf);
-    n = tpv_ccl_moments(bin_buf, TPV_WIDTH, TPV_HEIGHT, blobs_buf, 4);
+    n = tpv_ccl_moments(bin_buf, TPV_WIDTH, TPV_HEIGHT, blobs_buf, 4, NULL);
     CHECK_EQ_I(n, 1);
     tpv_shape_features(&blobs_buf[0], &f2);
 

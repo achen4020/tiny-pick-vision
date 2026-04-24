@@ -29,8 +29,8 @@ SRCS = src/threshold.c src/ccl_moments.c src/shape_features.c \
 
 HOST_OBJS = $(patsubst src/%.c,build/host/%.o,$(SRCS))
 
-TEST_FILES = $(filter-out tests/test_debug_api.c,$(wildcard tests/test_*.c))
-TEST_BINS  = $(patsubst tests/%.c,build/%,$(TEST_FILES)) build/test_debug_api
+TEST_FILES = $(filter-out tests/test_debug_api.c tests/test_debug_api_v2.c,$(wildcard tests/test_*.c))
+TEST_BINS  = $(patsubst tests/%.c,build/%,$(TEST_FILES)) build/test_debug_api build/test_debug_api_v2
 
 .PHONY: host target test size check-layout check-layout-target clean
 
@@ -64,6 +64,10 @@ build/test_%: tests/test_%.c tests/testlib.c $(SRCS) tests/stub_model_data.c | b
 # test_debug_api needs TPV_DEBUG_FEATURES turned on so the debug
 # function is visible. Everything else on the host toolchain.
 build/test_debug_api: tests/test_debug_api.c tests/testlib.c $(SRCS) tests/stub_model_data.c | build
+	$(CC_HOST) $(CFLAGS_HOST) -DTPV_DEBUG_FEATURES -o $@ $^ -lm
+
+# v2 debug entry point test: same TPV_DEBUG_FEATURES guard.
+build/test_debug_api_v2: tests/test_debug_api_v2.c tests/testlib.c $(SRCS) tests/stub_model_data.c | build
 	$(CC_HOST) $(CFLAGS_HOST) -DTPV_DEBUG_FEATURES -o $@ $^ -lm
 
 # Host-side regression replay MUST link the real calibrated model_data.c so

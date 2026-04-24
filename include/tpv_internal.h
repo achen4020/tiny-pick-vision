@@ -33,7 +33,8 @@ typedef struct {
 /* spec §4.2 module contracts */
 void tpv_threshold(const uint8_t *y, int w, int h, uint8_t *bin_out);
 int  tpv_ccl_moments(const uint8_t *bin, int w, int h,
-                     tpv_Blob *blobs_out, int max_blobs);
+                     tpv_Blob *blobs_out, int max_blobs,
+                     uint16_t *labels_out);
 void tpv_shape_features(const tpv_Blob *blob, tpv_Features *features_out);
 void tpv_classify(const tpv_Features *f,
                   const tpv_Template *tmpl, int n_templates,
@@ -75,6 +76,30 @@ int64_t tpv_mahal_sq_q16(const tpv_Features *f, const tpv_Template *tmpl);
 
 int tpv_process_frame_debug(const uint8_t *y, int w, int h,
                             tpv_DetectionDebug *out);
+
+/* v2 debug entry point (spec §4). Runtime-tunable threshold +
+ * dark-object-mode + ROI rect; emits three 38400 B bitmaps (bin after
+ * threshold+ROI, all CCL blobs, winning blob) plus winner bbox / area /
+ * 8x8 grid. Non-OK returns zero the entire struct (spec §4.4). */
+typedef struct {
+    tpv_Detection det;
+    tpv_Features  features;
+    int32_t       distances_sq[TPV_N_CLASSES];
+
+    int16_t  bbox_x0, bbox_y0, bbox_x1, bbox_y1;
+    int32_t  area_px;
+    int32_t  grid_8x8;
+    uint8_t  bin[TPV_WIDTH * TPV_HEIGHT / 8];
+    uint8_t  all_blobs_mask[TPV_WIDTH * TPV_HEIGHT / 8];
+    uint8_t  mask[TPV_WIDTH * TPV_HEIGHT / 8];
+} tpv_DetectionDebugV2;
+
+int tpv_process_frame_debug_v2(
+    const uint8_t *y, int w, int h,
+    uint8_t bin_threshold,
+    int dark_object_mode,
+    int roi_x, int roi_y, int roi_w, int roi_h,
+    tpv_DetectionDebugV2 *out);
 #endif  /* TPV_DEBUG_FEATURES */
 
 #endif

@@ -143,7 +143,7 @@ int tpv_cal_load_class_frames(const char *dir, tpv_Features *out, int cap) {
             if (f) {
                 if (fread(y, 1, sizeof y, f) == sizeof y) {
                     tpv_threshold(y, TPV_WIDTH, TPV_HEIGHT, bin);
-                    int nb = tpv_ccl_moments(bin, TPV_WIDTH, TPV_HEIGHT, blobs, TPV_MAX_BLOBS);
+                    int nb = tpv_ccl_moments(bin, TPV_WIDTH, TPV_HEIGHT, blobs, TPV_MAX_BLOBS, NULL);
                     /* Calibration scenes should have exactly one in-range blob. */
                     if (nb == 1 && blobs[0].m00 >= TPV_AMIN && blobs[0].m00 <= TPV_AMAX) {
                         tpv_shape_features(&blobs[0], &out[n++]);

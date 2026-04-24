@@ -6,7 +6,7 @@ TEST(t_single_square_blob) {
     uint8_t bin[8];
     for (int i = 0; i < 8; i++) bin[i] = 0xFF;
     tpv_Blob blobs[4];
-    int n = tpv_ccl_moments(bin, 8, 8, blobs, 4);
+    int n = tpv_ccl_moments(bin, 8, 8, blobs, 4, NULL);
     CHECK_EQ_I(n, 1);
     CHECK_EQ_I(blobs[0].m00, 64);
     /* centroid = (3.5, 3.5); m10 = sum of x = 8 * (0+1+...+7) = 8 * 28 = 224 */
@@ -22,7 +22,7 @@ TEST(t_two_disjoint_blobs) {
     bin[0] = 0x03; bin[1] = 0x03;   /* rows 0,1 cols 0,1 */
     bin[6] = 0xC0; bin[7] = 0xC0;   /* rows 6,7 cols 6,7 */
     tpv_Blob blobs[4];
-    int n = tpv_ccl_moments(bin, 8, 8, blobs, 4);
+    int n = tpv_ccl_moments(bin, 8, 8, blobs, 4, NULL);
     CHECK_EQ_I(n, 2);
 }
 
@@ -31,7 +31,7 @@ TEST(t_max_labels_overflow_returns_neg1) {
     uint8_t bin[128] = {0};
     for (int i = 0; i < 32 * 32; i += 2) bin[i >> 3] |= (uint8_t)(1u << (i & 7));
     tpv_Blob b[TPV_MAX_BLOBS];
-    int n = tpv_ccl_moments(bin, 32, 32, b, TPV_MAX_BLOBS);
+    int n = tpv_ccl_moments(bin, 32, 32, b, TPV_MAX_BLOBS, NULL);
     /* protocol-only: no out-of-bounds, no crash; either negative or <= MAX_BLOBS */
     CHECK((n < 0) || (n <= TPV_MAX_BLOBS));
 }
@@ -44,7 +44,7 @@ TEST(t_symmetric_square_has_zero_third_moments) {
     uint8_t bin[8];
     for (int i = 0; i < 8; i++) bin[i] = 0xFF;
     tpv_Blob blobs[4];
-    int n = tpv_ccl_moments(bin, 8, 8, blobs, 4);
+    int n = tpv_ccl_moments(bin, 8, 8, blobs, 4, NULL);
     CHECK_EQ_I(n, 1);
     CHECK_EQ_I(blobs[0].mu30, 0);
     CHECK_EQ_I(blobs[0].mu21, 0);
@@ -78,8 +78,8 @@ TEST(t_asymmetric_blob_is_translation_invariant) {
     paint_L_at(bin_a, 16, 1, 1);      /* L near the origin corner */
     paint_L_at(bin_b, 16, 10, 10);    /* same L shifted by (+9, +9) */
 
-    int na = tpv_ccl_moments(bin_a, 16, 16, blobs_a, 4);
-    int nb = tpv_ccl_moments(bin_b, 16, 16, blobs_b, 4);
+    int na = tpv_ccl_moments(bin_a, 16, 16, blobs_a, 4, NULL);
+    int nb = tpv_ccl_moments(bin_b, 16, 16, blobs_b, 4, NULL);
     CHECK_EQ_I(na, 1);
     CHECK_EQ_I(nb, 1);
     CHECK_EQ_I(blobs_a[0].m00, 5);

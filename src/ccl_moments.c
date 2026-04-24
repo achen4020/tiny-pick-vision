@@ -33,7 +33,8 @@ static inline int bit_at(const uint8_t *bin, int w, int h, int x, int y) {
 }
 
 int tpv_ccl_moments(const uint8_t *bin, int w, int h,
-                    tpv_Blob *blobs_out, int max_blobs) {
+                    tpv_Blob *blobs_out, int max_blobs,
+                    uint16_t *labels_out) {
     /* Pass 1: scan + 4-neighbour (up & left), assign temporary labels. */
     uf_reset(0);
     uint32_t next_label = 1;
@@ -94,6 +95,10 @@ int tpv_ccl_moments(const uint8_t *bin, int w, int h,
         for (int x = 0; x < w; x++) {
             int idx = y * w + x;
             uint16_t rl = g_labels[idx] ? g_remap[g_labels[idx]] : 0;
+            /* v2 debug exposes compact post-remap labels so callers can
+             * derive winning-blob / all-blobs bitmaps without a second
+             * CCL pass. Background stays 0. */
+            if (labels_out) labels_out[idx] = rl;
             if (!rl) continue;
             tpv_Blob *b = &blobs_out[rl - 1];
 
