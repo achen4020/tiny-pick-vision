@@ -13,4 +13,5 @@ android/app/src/main/jniLibs/
 android/app/src/main/assets/tpv_model_sha.txt
 android/.gradle/
 android/app/build/
+android/app/.cxx/
 android/local.properties

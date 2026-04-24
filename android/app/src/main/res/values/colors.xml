@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="amber_warn">#F5A623</color>
+    <color name="red_err">#D0021B</color>
+    <color name="grey_neutral">#9B9B9B</color>
+    <!-- 5-class palette (tab10 first 5, with #3 swapped from red to brown
+         to avoid collision with red_err). -->
+    <color name="cls0">#1F77B4</color>
+    <color name="cls1">#FF7F0E</color>
+    <color name="cls2">#2CA02C</color>
+    <color name="cls3">#8C564B</color>
+    <color name="cls4">#9467BD</color>
+</resources>
