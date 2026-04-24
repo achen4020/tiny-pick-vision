@@ -292,3 +292,69 @@ Other deferred work (non-blocking, found during implementation):
   the gripper layer (typical for industrial picks — the gripper has a
   preferred orientation it can rotate to). Re-introduce the projection if a
   future product needs single-pass full-360° pose.
+
+---
+
+## 11. Android bench test APP
+
+An arm64-v8a Android APP lives under `android/`. Its purpose is to run
+`tpv_process_frame_debug` on live camera frames on a real device, record
+every detection event, and emit a `timing.bin` for A2 (≤ 30 ms) verification.
+
+Design: `docs/specs/2026-04-23-android-bench-test-app-design.md`.
+Implementation plan: `docs/plans/2026-04-23-android-bench-test-app-plan.md`.
+
+### Build
+
+Prereqs:
+- NDK r26+ with `aarch64-linux-android24-clang` on PATH (same NDK as §3)
+- Android SDK with CameraX-compatible platform (API 34 compileSdk)
+- JDK 17 (Gradle 8.7 requires it)
+- `src/model_data.c` must exist (run the calibration tool first; see §4)
+
+```bash
+# Cross-compile libtpv for arm64 + copy into APK jniLibs + write model SHA
+make android-so
+
+# Run Gradle to produce a debug APK
+make android-apk
+# APK at android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+### Install and run
+
+```bash
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n com.tpv.bench/.MainActivity
+```
+
+Grant the CAMERA permission, tap Start, place objects in front of the
+back camera one at a time. HUD shows state, FPS, event count. Tap Stop —
+toast shows the zip filename.
+
+### Retrieve a run
+
+```bash
+adb shell run-as com.tpv.bench ls files/runs/
+adb exec-out run-as com.tpv.bench sh -c 'cat files/runs/run_<ts>.zip' > run.zip
+```
+
+### Unit tests (JVM)
+
+```bash
+cd android && ./gradlew :app:testDebugUnitTest
+```
+
+Covers `YuvAdapter` (YUV crop+downsample), `TriggerMachine` (state
+transitions + flicker commits), `RunRecorder` (meta.json / jsonl /
+timing.bin layout), `OverlayPainter` (colour + coord + text rules).
+
+### A2 p95 analysis
+
+```bash
+unzip run.zip -d /tmp/run
+python3 tools/analyze_timing.py /tmp/run/timing.bin
+```
+
+Prints p50/p95/p99 of `tpv_process_frame_debug` nanosecond latency, with
+PASS/FAIL against the 30 ms p95 gate.
