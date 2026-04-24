@@ -2562,6 +2562,11 @@ class OverlayView @JvmOverloads constructor(
         style = Paint.Style.STROKE ; strokeWidth = 4f
     }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 36f }
+    private val flashPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 12f
+        this.color = Color.GREEN   // `this.` to avoid shadow collision with outer `val color`
+    }
 
     /** Called every frame (~24 fps). NEVER touches commit/flash state. */
     fun updateLive(
@@ -2589,6 +2594,7 @@ class OverlayView @JvmOverloads constructor(
 
     override fun onDraw(canvas: Canvas) {
         val f = live.get() ?: return
+        if (width == 0 || height == 0) return    // pre-layout guard
         val w = width.toFloat() ; val h = height.toFloat()
         val sx = w / f.nativeW ; val sy = h / f.nativeH
 
@@ -2626,11 +2632,7 @@ class OverlayView @JvmOverloads constructor(
             val nowMs = System.currentTimeMillis()
             val remaining = c.flashEndMs - nowMs
             if (remaining > 0) {
-                val flashPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    style = Paint.Style.STROKE ; strokeWidth = 12f
-                    color = Color.GREEN
-                    alpha = (255 * remaining / 300).toInt().coerceIn(0, 255)
-                }
+                flashPaint.alpha = (255 * remaining / 300).toInt().coerceIn(0, 255)
                 canvas.drawRect(0f, 0f, w, h, flashPaint)
                 postInvalidateDelayed(16)   // keep animating until the flash expires
             }
