@@ -102,7 +102,8 @@ clean:
 # arm64 debug .so. Links the real src/model_data.c (same as build/replay);
 # missing model_data.c should fail with "No rule to make target".
 build/libtpv-arm64-debug.so: $(SRCS) src/model_data.c | build
-	$(CC_TARGET_ARM64) $(CFLAGS_TARGET_ARM64) -shared -o $@ $(SRCS) src/model_data.c
+	$(CC_TARGET_ARM64) $(CFLAGS_TARGET_ARM64) -shared -Wl,-soname,libtpv.so \
+	  -o $@ $(SRCS) src/model_data.c
 
 # android-so: place the .so under the APK's jniLibs/ and emit the model_data.c
 # SHA-256 as an APK asset. tpv_jni.c is built by Android Studio's CMake and

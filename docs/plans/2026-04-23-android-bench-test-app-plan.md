@@ -496,7 +496,8 @@ At the bottom of `Makefile` (before the `-include` line), add:
 # arm64 debug .so. Links the real src/model_data.c (same as build/replay);
 # missing model_data.c should fail with "No rule to make target".
 build/libtpv-arm64-debug.so: $(SRCS) src/model_data.c | build
-	$(CC_TARGET_ARM64) $(CFLAGS_TARGET_ARM64) -shared -o $@ $(SRCS) src/model_data.c
+	$(CC_TARGET_ARM64) $(CFLAGS_TARGET_ARM64) -shared -Wl,-soname,libtpv.so \
+	  -o $@ $(SRCS) src/model_data.c
 
 # android-so: place the .so under the APK's jniLibs/ and emit the model_data.c
 # SHA-256 as an APK asset. tpv_jni.c is built by Android Studio's CMake and
@@ -897,8 +898,14 @@ project(tpv_jni LANGUAGES C)
 # `make android-so`. IMPORTED means CMake does not try to build it —
 # only links against it.
 add_library(tpv SHARED IMPORTED)
+# IMPORTED_SONAME forces libtpv_jni.so's DT_NEEDED to the short name
+# `libtpv.so`, so the Android linker resolves it under the APK's
+# /data/app/.../lib/arm64/ at runtime. Without it the linker writes
+# IMPORTED_LOCATION's absolute build-machine path into DT_NEEDED, and
+# dlopen fails on device with "library ... not found".
 set_target_properties(tpv PROPERTIES
-    IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libtpv.so)
+    IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libtpv.so
+    IMPORTED_SONAME   libtpv.so)
 
 # Path from this CMakeLists.txt to the repo root:
 #   android/ (1) → app/ (2) → src/ (3) → main/ (4) → cpp/ (5)
