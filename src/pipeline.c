@@ -2,6 +2,14 @@
 #include "tpv_internal.h"
 #include "tpv.h"
 
+/* Threading contract: this module's file-static scratch (pre-existing
+ * g_bin/g_blobs/g_pool/g_d1sq_pool plus debug-only g_features_pool and
+ * s_last_winner_*) is NOT re-entrant. Callers must serialize
+ * tpv_process_frame() and tpv_process_frame_debug() invocations on a
+ * single thread. The bench-test APP (spec §3) pins the whole
+ * camera → JNI → recorder chain onto a single executor; the C library
+ * by itself imposes no synchronization. */
+
 /* Per-frame scratch in .bss (no heap, no large stack). */
 static uint8_t       g_bin[TPV_WIDTH * TPV_HEIGHT / 8];
 static tpv_Blob      g_blobs[TPV_MAX_BLOBS];
@@ -93,8 +101,6 @@ int tpv_process_frame(const uint8_t *y, int w, int h, tpv_Detection *det_out) {
 }
 
 #ifdef TPV_DEBUG_FEATURES
-#include "stdint.h"    /* INT32_MAX */
-
 /* Debug variant: first runs the production path (so the decision is
  * byte-identical), then reads back the winning blob's features from the
  * module-static stash and computes per-template d² by looping over
