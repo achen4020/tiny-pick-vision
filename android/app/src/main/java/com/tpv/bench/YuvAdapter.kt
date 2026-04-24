@@ -32,6 +32,9 @@ class YuvAdapter(
     fun extract(src: ByteArray, rowStride: Int, width: Int, height: Int): Result {
         require(width > 0 && height > 0) { "native size must be positive" }
         require(rowStride >= width) { "rowStride=$rowStride < width=$width" }
+        require(width >= targetW && height >= targetH) {
+            "native ${width}x${height} smaller than target ${targetW}x${targetH}; YuvAdapter downsamples only, does not upsample"
+        }
         require(src.size >= rowStride * height) { "src buffer too small" }
 
         val crop = computeCrop(width, height)
