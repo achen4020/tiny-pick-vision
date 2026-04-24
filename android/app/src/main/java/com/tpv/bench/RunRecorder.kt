@@ -37,6 +37,7 @@ class RunRecorder(
     private val runDir: File,
     private val meta: MetaInfo,
 ) {
+    private var logStream: FileOutputStream? = null
     private var logWriter: BufferedWriter? = null
     private var timingFile: FileOutputStream? = null
     private val timingBatch = ByteBuffer.allocate(48 * 100).order(ByteOrder.LITTLE_ENDIAN)
@@ -45,9 +46,11 @@ class RunRecorder(
         runDir.mkdirs()
         File(runDir, "meta.json").writeText(metaToJson().toString(2))
 
-        logWriter = File(runDir, "log.jsonl").bufferedWriter()
+        logStream = FileOutputStream(File(runDir, "log.jsonl"))
+        logWriter = logStream!!.bufferedWriter()
 
-        timingFile = FileOutputStream(File(runDir, "timing.bin"))
+        val tf = FileOutputStream(File(runDir, "timing.bin"))
+        timingFile = tf
         val header = ByteBuffer.allocate(32).order(ByteOrder.LITTLE_ENDIAN)
         header.put('T'.code.toByte()); header.put('T'.code.toByte())
         header.put('M'.code.toByte()); header.put('L'.code.toByte())
@@ -55,7 +58,7 @@ class RunRecorder(
         header.putShort(48)            // record_size
         header.putLong(System.nanoTime())  // run_start_ns
         // last 16 bytes remain zero
-        timingFile!!.write(header.array())
+        tf.write(header.array())
     }
 
     private fun metaToJson(): JSONObject {
@@ -94,6 +97,8 @@ class RunRecorder(
         event: CommittedEvent, triggerTsMs: Long,
         rawY: ByteArray, overlayJpeg: ByteArray,
     ) {
+        val w = logWriter ?: error("RunRecorder.start() not called")
+        val ls = logStream ?: error("RunRecorder.start() not called")
         val name = "%06d".format(event.eventIdx)
         File(runDir, "$name.y").writeBytes(rawY)
         File(runDir, "$name.jpg").writeBytes(overlayJpeg)
@@ -136,9 +141,10 @@ class RunRecorder(
             .put("distances_sq", dsq)
             .put("artifacts", artifacts)
 
-        logWriter!!.write(line.toString())
-        logWriter!!.newLine()
-        logWriter!!.flush()     // per-event sync; spec §10.4
+        w.write(line.toString())
+        w.newLine()
+        w.flush()                 // push BufferedWriter -> FileOutputStream
+        ls.fd.sync()              // durable disk commit; spec §10.4
     }
 
     fun recordFrameTiming(t: FrameTiming) {
@@ -165,13 +171,16 @@ class RunRecorder(
 
     private fun flushTimingBatch() {
         if (timingBatch.position() == 0) return
-        timingFile!!.write(timingBatch.array(), 0, timingBatch.position())
+        val f = timingFile ?: error("RunRecorder.start() not called")
+        f.write(timingBatch.array(), 0, timingBatch.position())
+        f.fd.sync()               // durable disk commit; spec §10.4
         timingBatch.clear()
     }
 
     fun close() {
         flushTimingBatch()
         logWriter?.close() ; logWriter = null
+        logStream?.close() ; logStream = null
         timingFile?.close() ; timingFile = null
     }
 
@@ -200,11 +209,14 @@ class RunRecorder(
         close()
         val zipFile = File(runDir.parentFile, "${runDir.name}.zip")
         ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
-            runDir.listFiles()?.sortedBy { it.name }?.forEach { f ->
-                zos.putNextEntry(ZipEntry(f.name))
-                f.inputStream().use { it.copyTo(zos) }
-                zos.closeEntry()
-            }
+            runDir.listFiles()
+                ?.filter { !it.name.startsWith(".") }
+                ?.sortedBy { it.name }
+                ?.forEach { f ->
+                    zos.putNextEntry(ZipEntry(f.name))
+                    f.inputStream().use { it.copyTo(zos) }
+                    zos.closeEntry()
+                }
         }
         return zipFile
     }
