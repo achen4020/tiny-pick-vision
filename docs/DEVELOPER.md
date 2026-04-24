@@ -321,6 +321,22 @@ make android-apk
 # APK at android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+### Pre-flight SHA check (before installing)
+
+The APK embeds `assets/tpv_model_sha.txt` at build time — a SHA-256 of the
+`src/model_data.c` that was compiled into `libtpv.so`. If you install an
+APK whose embedded SHA doesn't match your current `src/model_data.c`,
+`log.jsonl`'s `meta.json.model_data_sha256` will reference a model the
+code hasn't seen, and later replay-parity checks (§14 criterion 2) will
+look broken for an unrelated reason. Run this before `adb install`:
+
+```bash
+make android-verify-sha
+# OK: APK model sha matches src/model_data.c (<64 hex>)
+```
+
+If it reports `MISMATCH`, run `make android-apk` to rebuild and retry.
+
 ### Install and run
 
 ```bash

@@ -110,7 +110,8 @@ build/libtpv-arm64-debug.so: $(SRCS) src/model_data.c | build
 # file instead of a compile-time constant.
 ANDROID_JNI_LIBS    = android/app/src/main/jniLibs/arm64-v8a
 ANDROID_ASSETS      = android/app/src/main/assets
-.PHONY: android-so android-apk
+ANDROID_APK         = android/app/build/outputs/apk/debug/app-debug.apk
+.PHONY: android-so android-apk android-verify-sha
 android-so: build/libtpv-arm64-debug.so
 	mkdir -p $(ANDROID_JNI_LIBS) && \
 	cp $< $(ANDROID_JNI_LIBS)/libtpv.so && \
@@ -121,6 +122,25 @@ android-so: build/libtpv-arm64-debug.so
 
 android-apk: android-so
 	cd android && ./gradlew assembleDebug
-	@echo "APK at android/app/build/outputs/apk/debug/app-debug.apk"
+	@echo "APK at $(ANDROID_APK)"
+
+# Pre-flight check for device acceptance: the SHA-256 inside the built APK
+# (assets/tpv_model_sha.txt) must match the current src/model_data.c. If it
+# diverges, the APK you're about to install was built against a different
+# model — `make android-apk` first, then retry. See DEVELOPER.md §11.
+android-verify-sha:
+	@test -f $(ANDROID_APK) || { echo "FAIL: APK not built. Run 'make android-apk' first."; exit 1; }
+	@test -f src/model_data.c || { echo "FAIL: src/model_data.c missing. Run calibration (§4) first."; exit 1; }
+	@cur_sha=$$($(SHA256_CMD) src/model_data.c | awk '{print $$1}'); \
+	 apk_sha=$$(unzip -p $(ANDROID_APK) assets/tpv_model_sha.txt | tr -d '[:space:]'); \
+	 if [ "$$cur_sha" = "$$apk_sha" ]; then \
+	   echo "OK: APK model sha matches src/model_data.c ($$cur_sha)"; \
+	 else \
+	   echo "MISMATCH:"; \
+	   echo "  current src/model_data.c sha: $$cur_sha"; \
+	   echo "  APK assets/tpv_model_sha.txt: $$apk_sha"; \
+	   echo "Run 'make android-apk' to rebuild before installing."; \
+	   exit 1; \
+	 fi
 
 -include $(HOST_OBJS:.o=.d) $(TEST_BINS:=.d)
