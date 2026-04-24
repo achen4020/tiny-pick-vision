@@ -386,7 +386,8 @@ At the very end of `src/pipeline.c`, append:
 
 ```c
 #ifdef TPV_DEBUG_FEATURES
-#include "stdint.h"    /* INT32_MAX */
+/* INT32_MAX comes transitively via tpv_internal.h → <stdint.h>, so no
+ * additional include is needed here. */
 
 /* Debug variant: first runs the production path (so the decision is
  * byte-identical), then reads back the winning blob's features from the
