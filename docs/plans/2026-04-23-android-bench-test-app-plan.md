@@ -506,9 +506,9 @@ ANDROID_JNI_LIBS    = android/app/src/main/jniLibs/arm64-v8a
 ANDROID_ASSETS      = android/app/src/main/assets
 .PHONY: android-so android-apk
 android-so: build/libtpv-arm64-debug.so
-	mkdir -p $(ANDROID_JNI_LIBS)
-	cp $< $(ANDROID_JNI_LIBS)/libtpv.so
-	mkdir -p $(ANDROID_ASSETS)
+	mkdir -p $(ANDROID_JNI_LIBS) && \
+	cp $< $(ANDROID_JNI_LIBS)/libtpv.so && \
+	mkdir -p $(ANDROID_ASSETS) && \
 	$(SHA256_CMD) src/model_data.c | awk '{print $$1}' > $(ANDROID_ASSETS)/tpv_model_sha.txt
 	@echo "OK: libtpv.so at $(ANDROID_JNI_LIBS)/libtpv.so"
 	@echo "OK: model sha at $(ANDROID_ASSETS)/tpv_model_sha.txt (`cat $(ANDROID_ASSETS)/tpv_model_sha.txt`)"
