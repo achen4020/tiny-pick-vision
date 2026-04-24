@@ -16,8 +16,8 @@ SRCS = src/threshold.c src/ccl_moments.c src/shape_features.c \
 
 HOST_OBJS = $(patsubst src/%.c,build/host/%.o,$(SRCS))
 
-TEST_FILES = $(wildcard tests/test_*.c)
-TEST_BINS  = $(patsubst tests/%.c,build/%,$(TEST_FILES))
+TEST_FILES = $(filter-out tests/test_debug_api.c,$(wildcard tests/test_*.c))
+TEST_BINS  = $(patsubst tests/%.c,build/%,$(TEST_FILES)) build/test_debug_api
 
 .PHONY: host target test size check-layout check-layout-target clean
 
@@ -47,6 +47,11 @@ build/libtpv-arm.so: $(SRCS) src/model_data.c | build
 
 build/test_%: tests/test_%.c tests/testlib.c $(SRCS) tests/stub_model_data.c | build
 	$(CC_HOST) $(CFLAGS_HOST) -o $@ $^ -lm
+
+# test_debug_api needs TPV_DEBUG_FEATURES turned on so the debug
+# function is visible. Everything else on the host toolchain.
+build/test_debug_api: tests/test_debug_api.c tests/testlib.c $(SRCS) tests/stub_model_data.c | build
+	$(CC_HOST) $(CFLAGS_HOST) -DTPV_DEBUG_FEATURES -o $@ $^ -lm
 
 # Host-side regression replay MUST link the real calibrated model_data.c so
 # the CSV represents actual production decisions. Linking tests/stub_model_data

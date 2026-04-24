@@ -60,4 +60,21 @@ int64_t tpv_isqrt_i64(int64_t x);                /* plain floor(sqrt) for large 
 int32_t tpv_log_q16(int64_t x_q16);
 int32_t tpv_atan2_q16(int64_t y, int64_t x);
 
+#ifdef TPV_DEBUG_FEATURES
+typedef struct {
+    tpv_Detection det;
+    tpv_Features  features;
+    int32_t       distances_sq[TPV_N_CLASSES];
+} tpv_DetectionDebug;
+
+/* Per-template squared Mahalanobis distance, exposed only under
+ * TPV_DEBUG_FEATURES so tpv_process_frame_debug can fill the
+ * distances_sq[] array. Thin wrapper around the file-static
+ * mahal_sq_q16 inside classifier.c. */
+int64_t tpv_mahal_sq_q16(const tpv_Features *f, const tpv_Template *tmpl);
+
+int tpv_process_frame_debug(const uint8_t *y, int w, int h,
+                            tpv_DetectionDebug *out);
+#endif  /* TPV_DEBUG_FEATURES */
+
 #endif

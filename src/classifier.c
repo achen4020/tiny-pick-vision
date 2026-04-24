@@ -71,3 +71,12 @@ void tpv_classify(const tpv_Features *f,
         *confidence_out = (uint8_t)min_q8;
     }
 }
+
+#ifdef TPV_DEBUG_FEATURES
+/* Debug-only wrapper. mahal_sq_q16() above is static (file scope); this
+ * wrapper gives pipeline.c's debug path a way to ask for d² against any
+ * template without duplicating the inner loop. */
+int64_t tpv_mahal_sq_q16(const tpv_Features *f, const tpv_Template *tmpl) {
+    return mahal_sq_q16(f, tmpl);
+}
+#endif
