@@ -1725,6 +1725,12 @@ Expected: 11 failures (or NotImplementedError at first test).
 
 - [ ] **Step 6.4: Implement `onFrame` to make tests pass**
 
+Add a top-level import beneath the `package` line:
+
+```kotlin
+import kotlin.math.abs
+```
+
 Replace the skeleton class body with:
 
 ```kotlin
@@ -1775,8 +1781,8 @@ class TriggerMachine(
         }
         // PRESENT: check position stability against window[0]
         val first = window[0]
-        if (kotlin.math.abs(obs.x - first.x) > mDriftPx ||
-            kotlin.math.abs(obs.y - first.y) > mDriftPx) {
+        if (abs(obs.x - first.x) > mDriftPx ||
+            abs(obs.y - first.y) > mDriftPx) {
             reset()
             return StateMachineOutput.None
         }
@@ -1826,7 +1832,9 @@ class TriggerMachine(
         val ev = CommittedEvent(
             eventIdx = nextEventIdx,
             triggerFrameIdx = nth.frameIdxInRun,
-            triggerFrameDebug = nth.detection!!,
+            triggerFrameDebug = requireNotNull(nth.detection) {
+                "PRESENT frame must carry detection (frameIdx=${nth.frameIdxInRun})"
+            },
             eventClassId = eventClass,
             classIdHistogram = histogram.toMap(),
             flicker = histogram.size >= 2,

@@ -1,5 +1,7 @@
 package com.tpv.bench
 
+import kotlin.math.abs
+
 enum class FramePresence { PRESENT, EMPTY, DROP }
 
 data class FrameObservation(
@@ -73,8 +75,8 @@ class TriggerMachine(
         }
         // PRESENT: check position stability against window[0]
         val first = window[0]
-        if (kotlin.math.abs(obs.x - first.x) > mDriftPx ||
-            kotlin.math.abs(obs.y - first.y) > mDriftPx) {
+        if (abs(obs.x - first.x) > mDriftPx ||
+            abs(obs.y - first.y) > mDriftPx) {
             reset()
             return StateMachineOutput.None
         }
@@ -124,7 +126,9 @@ class TriggerMachine(
         val ev = CommittedEvent(
             eventIdx = nextEventIdx,
             triggerFrameIdx = nth.frameIdxInRun,
-            triggerFrameDebug = nth.detection!!,
+            triggerFrameDebug = requireNotNull(nth.detection) {
+                "PRESENT frame must carry detection (frameIdx=${nth.frameIdxInRun})"
+            },
             eventClassId = eventClass,
             classIdHistogram = histogram.toMap(),
             flicker = histogram.size >= 2,
