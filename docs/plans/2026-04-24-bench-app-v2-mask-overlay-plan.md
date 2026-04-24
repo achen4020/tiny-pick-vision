@@ -708,7 +708,10 @@ Inside `object TpvNative { ... }`, after the existing `external fun processFrame
  *
  * @param binThreshold  0..255 cutoff; dark_object_mode determines polarity.
  * @param darkObjectMode true = Y < threshold is foreground; false = Y ≥ threshold.
- * @param roiX..roiH     ROI rect in 640×480 coords. Use (0,0,640,480) to disable.
+ * @param roiX roiY roiW roiH  ROI rect in 640×480 coords. Use (0,0,640,480) to disable.
+ *                              (Do NOT write `roiX..roiH` — Kotlin 1.9 KDoc parses
+ *                              `..` as the range operator and errors with
+ *                              "Expression expected".)
  * @param outTimingNs    same semantics as v1: [jni_enter, tpv_enter, tpv_exit].
  */
 external fun processFrameDebugV2(
