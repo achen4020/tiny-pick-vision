@@ -36,6 +36,40 @@ data class TpvDetectionDebug(
         distancesSq.contentHashCode()
 }
 
+data class TpvBbox(val x: Int, val y: Int, val w: Int, val h: Int)
+
+data class TpvDetectionDebugV2(
+    val det: TpvDetection,
+    val features: TpvFeatures,
+    val distancesSq: IntArray,
+    val bbox: TpvBbox,
+    val areaPx: Int,
+    val grid8x8: Int,
+    val bin: ByteArray,
+    val allBlobsMask: ByteArray,
+    val mask: ByteArray,
+) {
+    override fun equals(other: Any?) = other is TpvDetectionDebugV2 &&
+        det == other.det && features == other.features &&
+        distancesSq.contentEquals(other.distancesSq) &&
+        bbox == other.bbox && areaPx == other.areaPx && grid8x8 == other.grid8x8 &&
+        bin.contentEquals(other.bin) &&
+        allBlobsMask.contentEquals(other.allBlobsMask) &&
+        mask.contentEquals(other.mask)
+    override fun hashCode(): Int {
+        var h = det.hashCode()
+        h = h * 31 + features.hashCode()
+        h = h * 31 + distancesSq.contentHashCode()
+        h = h * 31 + bbox.hashCode()
+        h = h * 31 + areaPx
+        h = h * 31 + grid8x8
+        h = h * 31 + bin.contentHashCode()
+        h = h * 31 + allBlobsMask.contentHashCode()
+        h = h * 31 + mask.contentHashCode()
+        return h
+    }
+}
+
 object TpvNative {
     init {
         System.loadLibrary("tpv")
@@ -61,6 +95,24 @@ object TpvNative {
         y: ByteArray, width: Int, height: Int,
         outTimingNs: LongArray,
     ): TpvDetectionDebug
+
+    /**
+     * Run the v2 debug variant with runtime-tunable threshold / dark mode / ROI.
+     * Returns a TpvDetectionDebugV2 whose `bin`, `allBlobsMask`, and `mask` are
+     * each 38400 bytes (640×480 / 8, LSB-first packed).
+     *
+     * @param binThreshold  0..255 cutoff; dark_object_mode determines polarity.
+     * @param darkObjectMode true = Y < threshold is foreground; false = Y ≥ threshold.
+     * @param roiX roiY roiW roiH ROI rect in 640×480 coords. Use (0,0,640,480) to disable.
+     * @param outTimingNs    same semantics as v1: [jni_enter, tpv_enter, tpv_exit].
+     */
+    external fun processFrameDebugV2(
+        y: ByteArray, width: Int, height: Int,
+        binThreshold: Int,
+        darkObjectMode: Boolean,
+        roiX: Int, roiY: Int, roiW: Int, roiH: Int,
+        outTimingNs: LongArray,
+    ): TpvDetectionDebugV2
 
     /** Reads `extern const uint8_t tpv_bin_threshold` from libtpv.so. */
     external fun binThreshold(): Int
