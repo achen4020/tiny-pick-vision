@@ -644,6 +644,10 @@ plugins {
 android {
     namespace = "com.tpv.bench"
     compileSdk = 34
+    // Pinned to match the build-tools used to produce the initial skeleton
+    // APK (4c350cc). Unpinned, AGP auto-picks the newest installed, which
+    // can drift between machines/CI.
+    buildToolsVersion = "35.0.0"
 
     defaultConfig {
         applicationId = "com.tpv.bench"
