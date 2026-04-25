@@ -298,10 +298,13 @@ class MainActivity : AppCompatActivity() {
 
         // Only paint a live marker on PRESENT frames. On TPV_EMPTY /
         // SCENE_ERROR / BAD_INPUT the C side zero-fills det, so rendering
-        // would otherwise draw a bogus (0,0) class-0 circle. clearLive()
+        // would otherwise draw a bogus (0,0) class-0 dot. clearLive()
         // drops only the live layer — commit state + 300 ms flash survive.
         if (presence == FramePresence.PRESENT) {
-            overlay.updateLive(result, adapted.crop, nativeW, nativeH)
+            // T-v2.4 bridge: ROI hard-coded to full 640×480; T-v2.6 will pull
+            // the real ROI from SettingsState (alongside binThreshold + dark mode).
+            val overlayRoi = YuvAdapter.CropRect(0, 0, 640, 480)
+            overlay.updateLive(result, overlayRoi, adapted.crop, nativeW, nativeH)
         } else {
             overlay.clearLive()
         }

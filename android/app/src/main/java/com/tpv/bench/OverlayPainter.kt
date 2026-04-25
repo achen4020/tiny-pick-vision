@@ -18,6 +18,36 @@ object OverlayPainter {
     const val RED_ERR      = 0xFFD0021B.toInt()
     const val GREY_NEUTRAL = 0xFF9B9B9B.toInt()
 
+    /** Mask fill color — pure green, alpha ≈ 120/255 ≈ 47% (spec §5.1). */
+    const val GREEN_MASK_ARGB  = 0x7800FF00.toInt()
+    /** ROI rectangle stroke color — same amber used for AMBIGUOUS warning. */
+    const val YELLOW_ROI_ARGB  = 0xFFF5A623.toInt()
+    /** Center dot color. */
+    const val RED_CENTER_ARGB  = 0xFFD0021B.toInt()
+
+    /** 640×480 / 8 = 38400 bytes per mask. */
+    const val MASK_BYTES = 640 * 480 / 8
+
+    /**
+     * Decode an LSB-first packed mask bitmap (width*height/8 bytes) into an
+     * ARGB IntArray where set bits → `argb`, clear bits → 0 (fully
+     * transparent). Pure logic — kept on `OverlayPainter` so JVM unit tests
+     * exercise it without Android. The caller wraps the IntArray into an
+     * `android.graphics.Bitmap` (see `OverlayView.onDraw`).
+     */
+    fun decodeMaskToArgb(mask: ByteArray, w: Int, h: Int, argb: Int): IntArray {
+        require(mask.size == w * h / 8) {
+            "mask size ${mask.size} != expected ${w * h / 8}"
+        }
+        val out = IntArray(w * h)
+        for (i in 0 until w * h) {
+            val byte = mask[i shr 3].toInt() and 0xFF
+            val bit = (byte ushr (i and 7)) and 1
+            if (bit == 1) out[i] = argb
+        }
+        return out
+    }
+
     /** §5.5 colour rule. Covers all 7 legal det_cls values (0..4, 254, 255). */
     fun colorFor(detClsId: Int): Int = when {
         detClsId in 0..4 -> PALETTE[detClsId]

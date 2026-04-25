@@ -1,6 +1,8 @@
 package com.tpv.bench
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class OverlayPainterTest {
@@ -86,5 +88,44 @@ class OverlayPainterTest {
     fun `line 2 text shows event_cls and flicker`() {
         val line2 = OverlayPainter.textLine2(eventClassId = 2, flicker = true)
         assertEquals("event_cls=2 flicker=true", line2)
+    }
+
+    @Test
+    fun `decodeMaskToArgb zero mask yields all-transparent array`() {
+        val mask = ByteArray(64 / 8)
+        val out = OverlayPainter.decodeMaskToArgb(mask, 8, 8, 0xFF00FF00.toInt())
+        assertEquals(64, out.size)
+        for (v in out) assertEquals(0, v)
+    }
+
+    @Test
+    fun `decodeMaskToArgb single bit at position 0 sets first pixel`() {
+        val mask = ByteArray(64 / 8)
+        mask[0] = 0x01  // bit 0 of byte 0 → pixel index 0
+        val argb = 0xFF00FF00.toInt()
+        val out = OverlayPainter.decodeMaskToArgb(mask, 8, 8, argb)
+        assertEquals(argb, out[0])
+        for (i in 1 until 64) assertEquals(0, out[i])
+    }
+
+    @Test
+    fun `decodeMaskToArgb LSB-first byte 0 0xFF sets first 8 pixels`() {
+        val mask = ByteArray(64 / 8)
+        mask[0] = 0xFF.toByte()
+        val argb = 0x7800FF00.toInt()
+        val out = OverlayPainter.decodeMaskToArgb(mask, 8, 8, argb)
+        for (i in 0 until 8) assertEquals(argb, out[i])
+        for (i in 8 until 64) assertEquals(0, out[i])
+    }
+
+    @Test
+    fun `decodeMaskToArgb rejects size mismatch`() {
+        val bad = ByteArray(7)  // should be 8 for 8x8
+        try {
+            OverlayPainter.decodeMaskToArgb(bad, 8, 8, 0)
+            fail("expected IllegalArgumentException")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("mask size"))
+        }
     }
 }

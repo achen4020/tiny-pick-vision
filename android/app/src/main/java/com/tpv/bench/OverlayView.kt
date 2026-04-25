@@ -1,9 +1,11 @@
 package com.tpv.bench
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.View
 import java.util.concurrent.atomic.AtomicReference
@@ -25,6 +27,10 @@ import kotlin.math.sin
  *                                           latched until naturally expires
  * A normal per-frame update must NOT clear flash or commit fields — that
  * was the P2-2 bug in the previous plan.
+ *
+ * v2 (T-v2.4): onDraw paints yellow ROI + green mask fill (only on TPV_OK)
+ * + red center dot + short axis line. v1's circle + 2-line text is dropped;
+ * status text moves to the HUD/status_line in T-v2.6.
  */
 class OverlayView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
@@ -32,7 +38,8 @@ class OverlayView @JvmOverloads constructor(
 
     private data class LiveState(
         val d: TpvDetectionDebugV2,
-        val crop: YuvAdapter.CropRect,
+        val roi: YuvAdapter.CropRect,         // ROI in 640×480 coords
+        val crop: YuvAdapter.CropRect,        // camera→640×480 crop
         val nativeW: Int, val nativeH: Int,
     )
     private data class CommitState(
@@ -44,10 +51,18 @@ class OverlayView @JvmOverloads constructor(
     private val live = AtomicReference<LiveState?>(null)
     private val commit = AtomicReference<CommitState?>(null)
 
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE ; strokeWidth = 4f
+    private val roiPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE ; strokeWidth = 2f
+        this.color = OverlayPainter.YELLOW_ROI_ARGB
     }
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 36f }
+    private val centerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        this.color = OverlayPainter.RED_CENTER_ARGB
+    }
+    private val axisPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE ; strokeWidth = 3f
+        this.color = OverlayPainter.RED_CENTER_ARGB
+    }
     private val flashPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 12f
@@ -56,15 +71,17 @@ class OverlayView @JvmOverloads constructor(
 
     /** Called every frame (~24 fps). NEVER touches commit/flash state. */
     fun updateLive(
-        d: TpvDetectionDebugV2, crop: YuvAdapter.CropRect,
+        d: TpvDetectionDebugV2,
+        roi: YuvAdapter.CropRect,
+        crop: YuvAdapter.CropRect,
         nativeW: Int, nativeH: Int,
     ) {
-        live.set(LiveState(d, crop, nativeW, nativeH))
+        live.set(LiveState(d, roi, crop, nativeW, nativeH))
         postInvalidate()
     }
 
     /** Called when current frame has no valid detection (TPV_EMPTY or dropped).
-     *  Clears the live circle/axis/line1 but leaves commit + flash state intact. */
+     *  Clears the live mask/dot/axis but leaves commit + flash state intact. */
     fun clearLive() {
         live.set(null)
         postInvalidate()
@@ -88,45 +105,61 @@ class OverlayView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         val f = live.get() ?: return
         if (width == 0 || height == 0) return    // pre-layout guard
-        val w = width.toFloat() ; val h = height.toFloat()
-        val sx = w / f.nativeW ; val sy = h / f.nativeH
+        val vw = width.toFloat() ; val vh = height.toFloat()
+        val sx = vw / f.nativeW ; val sy = vh / f.nativeH
 
-        // --- Live annotation (every frame) ---
-        val (nx, ny) = OverlayPainter.mapCoord(f.d.det.x, f.d.det.y, f.crop)
-        val cx = nx * sx ; val cy = ny * sy
-        val r = OverlayPainter.circleRadius(f.crop) * sx
-        val axisLen = OverlayPainter.axisLength(f.crop) * sx
-        val color = OverlayPainter.colorFor(f.d.det.classId)
-
-        paint.color = color
-        canvas.drawCircle(cx, cy, r, paint)
-
-        val thetaRad = Math.toRadians(f.d.det.thetaX10 / 10.0)
-        canvas.drawLine(
-            cx, cy,
-            (cx + axisLen * cos(thetaRad)).toFloat(),
-            (cy + axisLen * sin(thetaRad)).toFloat(),
-            paint
+        // ---- 1. Yellow ROI rectangle (drawn every frame, regardless of status) ----
+        // ROI is in 640×480 coords; map both corners through crop → native → view.
+        val (roiNx0, roiNy0) = OverlayPainter.mapCoord(f.roi.x, f.roi.y, f.crop)
+        val (roiNx1, roiNy1) = OverlayPainter.mapCoord(
+            f.roi.x + f.roi.w, f.roi.y + f.roi.h, f.crop)
+        canvas.drawRect(
+            roiNx0 * sx, roiNy0 * sy, roiNx1 * sx, roiNy1 * sy, roiPaint
         )
 
-        // Line 1 — live frame info (every frame updates)
-        textPaint.color = color
-        canvas.drawText(OverlayPainter.textLine1(f.d), 16f, 48f, textPaint)
+        // ---- 2. Green mask fill + red center dot + short axis line ----
+        // Only draw when the C side reported TPV_OK (status == 0). On
+        // TPV_EMPTY / SCENE_ERROR / BAD_INPUT the mask is all zeros and the
+        // det struct is zero-filled, so painting at (0,0) would be misleading.
+        val status = f.d.det.status
+        if (status == 0) {
+            val pixels = OverlayPainter.decodeMaskToArgb(
+                f.d.mask, 640, 480, OverlayPainter.GREEN_MASK_ARGB)
+            val maskBitmap = Bitmap.createBitmap(pixels, 640, 480, Bitmap.Config.ARGB_8888)
+            // Destination: map the 640×480 mask into the camera→target crop
+            // rect on the native frame, then to view coords.
+            val dstLeft   = f.crop.x * sx
+            val dstTop    = f.crop.y * sy
+            val dstRight  = (f.crop.x + f.crop.w) * sx
+            val dstBottom = (f.crop.y + f.crop.h) * sy
+            val dstRect = RectF(dstLeft, dstTop, dstRight, dstBottom)
+            canvas.drawBitmap(maskBitmap, null, dstRect, null)
 
-        // Line 2 — last committed event info (persistent; empty until first commit)
-        textPaint.color = OverlayPainter.GREY_NEUTRAL
+            // Red center dot
+            val (nx, ny) = OverlayPainter.mapCoord(f.d.det.x, f.d.det.y, f.crop)
+            val cx = nx * sx ; val cy = ny * sy
+            val dotR = (f.crop.w * 0.015f * sx).coerceAtLeast(4f)
+            canvas.drawCircle(cx, cy, dotR, centerPaint)
+
+            // Short axis line
+            val axisLen = (f.crop.w * 0.04f * sx).coerceAtLeast(8f)
+            val thetaRad = Math.toRadians(f.d.det.thetaX10 / 10.0)
+            canvas.drawLine(
+                cx, cy,
+                (cx + axisLen * cos(thetaRad)).toFloat(),
+                (cy + axisLen * sin(thetaRad)).toFloat(),
+                axisPaint
+            )
+        }
+
+        // ---- 3. Commit flash (persistent until flashEndMs) ----
         val c = commit.get()
-        val line2 = if (c != null) OverlayPainter.textLine2(c.eventClassId, c.flicker)
-                    else "event_cls=- flicker=-"
-        canvas.drawText(line2, 16f, 96f, textPaint)
-
-        // --- Commit flash (persistent until flashEndMs) ---
         if (c != null) {
             val nowMs = System.currentTimeMillis()
             val remaining = c.flashEndMs - nowMs
             if (remaining > 0) {
                 flashPaint.alpha = (255 * remaining / 300).toInt().coerceIn(0, 255)
-                canvas.drawRect(0f, 0f, w, h, flashPaint)
+                canvas.drawRect(0f, 0f, vw, vh, flashPaint)
                 postInvalidateDelayed(16)   // keep animating until the flash expires
             }
         }
