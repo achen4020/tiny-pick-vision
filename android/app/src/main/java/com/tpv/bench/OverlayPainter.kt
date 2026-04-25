@@ -24,6 +24,8 @@ object OverlayPainter {
     const val YELLOW_ROI_ARGB  = 0xFFF5A623.toInt()
     /** Center dot color. */
     const val RED_CENTER_ARGB  = 0xFFD0021B.toInt()
+    /** Commit-flash border color — pure green, opaque. (alpha set per-frame in OverlayView.) */
+    const val GREEN_FLASH_ARGB = 0xFF00FF00.toInt()
 
     /** 640×480 / 8 = 38400 bytes per mask. */
     const val MASK_BYTES = 640 * 480 / 8
@@ -46,6 +48,28 @@ object OverlayPainter {
             if (bit == 1) out[i] = argb
         }
         return out
+    }
+
+    /**
+     * In-place variant of [decodeMaskToArgb] that writes into a caller-owned
+     * IntArray to avoid per-frame allocation. Used by OverlayView.onDraw at
+     * ~24 fps where 1.2 MB / call adds up to GC pressure.
+     *
+     * @param out  pre-allocated IntArray of length w*h. Contents are
+     *             overwritten on every call (no need to pre-clear).
+     */
+    fun decodeMaskToArgb(mask: ByteArray, w: Int, h: Int, argb: Int, out: IntArray) {
+        require(mask.size == w * h / 8) {
+            "mask size ${mask.size} != expected ${w * h / 8}"
+        }
+        require(out.size == w * h) {
+            "out size ${out.size} != expected ${w * h}"
+        }
+        for (i in 0 until w * h) {
+            val byte = mask[i shr 3].toInt() and 0xFF
+            val bit = (byte ushr (i and 7)) and 1
+            out[i] = if (bit == 1) argb else 0
+        }
     }
 
     /** §5.5 colour rule. Covers all 7 legal det_cls values (0..4, 254, 255). */

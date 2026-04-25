@@ -3,7 +3,6 @@ package com.tpv.bench
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.util.AttributeSet
@@ -66,8 +65,14 @@ class OverlayView @JvmOverloads constructor(
     private val flashPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 12f
-        this.color = Color.GREEN   // `this.` to avoid shadow collision with outer `val color`
+        this.color = OverlayPainter.GREEN_FLASH_ARGB
     }
+
+    // Cached buffers for mask rendering. onDraw runs at ~24 fps; pre-allocating
+    // avoids 2.4 MB / frame Java heap churn (~58 MB/s GC pressure). Reuse via
+    // IntArray overload of decodeMaskToArgb + Bitmap.setPixels.
+    private val maskPixels = IntArray(640 * 480)
+    private val maskBitmap = Bitmap.createBitmap(640, 480, Bitmap.Config.ARGB_8888)
 
     /** Called every frame (~24 fps). NEVER touches commit/flash state. */
     fun updateLive(
@@ -123,9 +128,10 @@ class OverlayView @JvmOverloads constructor(
         // det struct is zero-filled, so painting at (0,0) would be misleading.
         val status = f.d.det.status
         if (status == 0) {
-            val pixels = OverlayPainter.decodeMaskToArgb(
-                f.d.mask, 640, 480, OverlayPainter.GREEN_MASK_ARGB)
-            val maskBitmap = Bitmap.createBitmap(pixels, 640, 480, Bitmap.Config.ARGB_8888)
+            // Decode v2.mask into our cached IntArray, push into cached Bitmap, draw.
+            OverlayPainter.decodeMaskToArgb(
+                f.d.mask, 640, 480, OverlayPainter.GREEN_MASK_ARGB, maskPixels)
+            maskBitmap.setPixels(maskPixels, 0, 640, 0, 0, 640, 480)
             // Destination: map the 640×480 mask into the camera→target crop
             // rect on the native frame, then to view coords.
             val dstLeft   = f.crop.x * sx

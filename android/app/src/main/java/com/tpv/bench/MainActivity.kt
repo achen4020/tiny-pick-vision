@@ -235,9 +235,7 @@ class MainActivity : AppCompatActivity() {
         val frameIdx = frameCounter.incrementAndGet().toLong()
 
         val timingBuf = LongArray(3)
-        // T-v2.3 bridge: use V2 API with v1-equivalent defaults (no ROI crop,
-        // bright-object mode, native-configured threshold). Task 6 wires real
-        // SettingsState values + UI toggles for darkObjectMode/ROI.
+        // TODO(T-v2.6): plumb darkObjectMode + binThreshold + roi from SettingsState snapshot
         val result = TpvNative.processFrameDebugV2(
             adapted.y, 640, 480,
             TpvNative.binThreshold(), /*darkObjectMode=*/false,
@@ -301,8 +299,7 @@ class MainActivity : AppCompatActivity() {
         // would otherwise draw a bogus (0,0) class-0 dot. clearLive()
         // drops only the live layer — commit state + 300 ms flash survive.
         if (presence == FramePresence.PRESENT) {
-            // T-v2.4 bridge: ROI hard-coded to full 640×480; T-v2.6 will pull
-            // the real ROI from SettingsState (alongside binThreshold + dark mode).
+            // TODO(T-v2.6): wire ROI from SettingsState (currently hard-coded full-frame)
             val overlayRoi = YuvAdapter.CropRect(0, 0, 640, 480)
             overlay.updateLive(result, overlayRoi, adapted.crop, nativeW, nativeH)
         } else {
@@ -441,8 +438,7 @@ class MainActivity : AppCompatActivity() {
             cpuMaxFreqKhz = readMaxCpuFreqKhz(),
             soSha256 = soSha256, modelDataSha256 = modelSha256,  // pre-computed
             nClasses = TpvNative.nClasses(), binThreshold = TpvNative.binThreshold(),
-            // T-v2.3 bridge: v2 meta fields use v1-equivalent defaults. Task 6
-            // wires real SettingsState values for darkObjectMode / ROI.
+            // TODO(T-v2.6): plumb darkObjectMode + binThreshold + roi from SettingsState snapshot
             darkObjectMode = false,
             roiX = 0, roiY = 0, roiW = 640, roiH = 480,
             nStable = s.n, kEmpty = s.k, mDriftPx = s.m,

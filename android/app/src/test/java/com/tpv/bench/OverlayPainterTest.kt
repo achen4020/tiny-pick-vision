@@ -128,4 +128,26 @@ class OverlayPainterTest {
             assertTrue(e.message!!.contains("mask size"))
         }
     }
+
+    @Test
+    fun `decodeMaskToArgb in-place variant writes to caller-owned array`() {
+        val mask = ByteArray(64 / 8)
+        mask[0] = 0xFF.toByte()
+        val out = IntArray(64) { -1 }   // sentinel to verify overwrite
+        OverlayPainter.decodeMaskToArgb(mask, 8, 8, 0xFF00FF00.toInt(), out)
+        for (i in 0 until 8) assertEquals(0xFF00FF00.toInt(), out[i])
+        for (i in 8 until 64) assertEquals(0, out[i])  // clears stale -1
+    }
+
+    @Test
+    fun `decodeMaskToArgb in-place rejects out size mismatch`() {
+        val mask = ByteArray(64 / 8)
+        val tooSmall = IntArray(63)
+        try {
+            OverlayPainter.decodeMaskToArgb(mask, 8, 8, 0, tooSmall)
+            fail("expected IllegalArgumentException")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("out size"))
+        }
+    }
 }
