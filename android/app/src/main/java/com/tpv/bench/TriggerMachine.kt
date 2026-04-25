@@ -9,7 +9,7 @@ data class FrameObservation(
     val x: Int, val y: Int,
     val classId: Int,
     val frameIdxInRun: Long,
-    val detection: TpvDetectionDebug?
+    val detection: TpvDetectionDebugV2?
 )
 
 enum class MachineState { IDLE, CANDIDATE, COMMITTED }
@@ -22,7 +22,7 @@ sealed class StateMachineOutput {
 data class CommittedEvent(
     val eventIdx: Long,
     val triggerFrameIdx: Long,
-    val triggerFrameDebug: TpvDetectionDebug,
+    val triggerFrameDebug: TpvDetectionDebugV2,
     val eventClassId: Int,
     val classIdHistogram: Map<Int, Int>,
     val flicker: Boolean,

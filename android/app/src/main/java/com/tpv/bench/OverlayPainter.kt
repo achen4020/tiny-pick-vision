@@ -37,7 +37,7 @@ object OverlayPainter {
     }
 
     /** Line 1 text per §5.5 three-branch rule. */
-    fun textLine1(d: TpvDetectionDebug): String {
+    fun textLine1(d: TpvDetectionDebugV2): String {
         val cls = d.det.classId
         return when {
             cls in 0..4 -> "det_cls=$cls conf=${d.det.confidenceQ8} d²=${d.distancesSq[cls]}"

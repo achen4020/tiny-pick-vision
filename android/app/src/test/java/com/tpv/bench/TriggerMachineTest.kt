@@ -9,14 +9,21 @@ import org.junit.Test
 
 class TriggerMachineTest {
 
+    private val EMPTY_MASK = ByteArray(640 * 480 / 8)
     private fun makeDetection(classId: Int, x: Int = 320, y: Int = 240) =
-        TpvDetectionDebug(
+        TpvDetectionDebugV2(
             det = TpvDetection(
                 status = 0, classId = classId,
                 x = x, y = y, thetaX10 = 0, confidenceQ8 = if (classId < 5) 200 else 0
             ),
             features = TpvFeatures(IntArray(7), 0, 0, 0),
-            distancesSq = IntArray(5)
+            distancesSq = IntArray(5),
+            bbox = TpvBbox(x - 10, y - 10, 20, 20),
+            areaPx = 400,
+            grid8x8 = 7,
+            bin = EMPTY_MASK,
+            allBlobsMask = EMPTY_MASK,
+            mask = EMPTY_MASK,
         )
 
     private fun present(classId: Int, x: Int = 320, y: Int = 240, idx: Long = 0L) =

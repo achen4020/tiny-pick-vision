@@ -42,10 +42,13 @@ class OverlayPainterTest {
 
     @Test
     fun `line 1 text shows d² on ACCEPTED`() {
-        val d = TpvDetectionDebug(
-            TpvDetection(0, 2, 320, 240, -450, 200),
-            TpvFeatures(IntArray(7), 0, 0, 0),
-            intArrayOf(9, 8, 7, 6, 5)
+        val d = TpvDetectionDebugV2(
+            det = TpvDetection(0, 2, 320, 240, -450, 200),
+            features = TpvFeatures(IntArray(7), 0, 0, 0),
+            distancesSq = intArrayOf(9, 8, 7, 6, 5),
+            bbox = TpvBbox(0, 0, 0, 0),
+            areaPx = 0, grid8x8 = 0,
+            bin = ByteArray(0), allBlobsMask = ByteArray(0), mask = ByteArray(0),
         )
         val line1 = OverlayPainter.textLine1(d)
         assertEquals("det_cls=2 conf=200 d²=7", line1)
@@ -53,10 +56,13 @@ class OverlayPainterTest {
 
     @Test
     fun `line 1 text shows d²min on AMBIGUOUS`() {
-        val d = TpvDetectionDebug(
-            TpvDetection(0, 0xFE, 320, 240, 0, 0),
-            TpvFeatures(IntArray(7), 0, 0, 0),
-            intArrayOf(9, 8, 7, 6, 5)
+        val d = TpvDetectionDebugV2(
+            det = TpvDetection(0, 0xFE, 320, 240, 0, 0),
+            features = TpvFeatures(IntArray(7), 0, 0, 0),
+            distancesSq = intArrayOf(9, 8, 7, 6, 5),
+            bbox = TpvBbox(0, 0, 0, 0),
+            areaPx = 0, grid8x8 = 0,
+            bin = ByteArray(0), allBlobsMask = ByteArray(0), mask = ByteArray(0),
         )
         val line1 = OverlayPainter.textLine1(d)
         assertEquals("det_cls=254 conf=0 d²min=5", line1)
@@ -64,10 +70,13 @@ class OverlayPainterTest {
 
     @Test
     fun `line 1 text shows d²min on REJECTED`() {
-        val d = TpvDetectionDebug(
-            TpvDetection(0, 0xFF, 320, 240, 0, 0),
-            TpvFeatures(IntArray(7), 0, 0, 0),
-            intArrayOf(5, 4, 3, 2, 1)
+        val d = TpvDetectionDebugV2(
+            det = TpvDetection(0, 0xFF, 320, 240, 0, 0),
+            features = TpvFeatures(IntArray(7), 0, 0, 0),
+            distancesSq = intArrayOf(5, 4, 3, 2, 1),
+            bbox = TpvBbox(0, 0, 0, 0),
+            areaPx = 0, grid8x8 = 0,
+            bin = ByteArray(0), allBlobsMask = ByteArray(0), mask = ByteArray(0),
         )
         val line1 = OverlayPainter.textLine1(d)
         assertEquals("det_cls=255 conf=0 d²min=1", line1)

@@ -235,7 +235,15 @@ class MainActivity : AppCompatActivity() {
         val frameIdx = frameCounter.incrementAndGet().toLong()
 
         val timingBuf = LongArray(3)
-        val result = TpvNative.processFrameDebug(adapted.y, 640, 480, timingBuf)
+        // T-v2.3 bridge: use V2 API with v1-equivalent defaults (no ROI crop,
+        // bright-object mode, native-configured threshold). Task 6 wires real
+        // SettingsState values + UI toggles for darkObjectMode/ROI.
+        val result = TpvNative.processFrameDebugV2(
+            adapted.y, 640, 480,
+            TpvNative.binThreshold(), /*darkObjectMode=*/false,
+            /*roiX=*/0, /*roiY=*/0, /*roiW=*/640, /*roiH=*/480,
+            timingBuf,
+        )
         val tJniReturn = System.nanoTime()
 
         // Compute presence BEFORE recordFrameTiming so we can honour the
@@ -280,6 +288,7 @@ class MainActivity : AppCompatActivity() {
             recorder?.recordEvent(
                 out.event, triggerTsMs = triggerTsMs,
                 rawY = adapted.y, overlayJpeg = jpg,
+                mask = out.event.triggerFrameDebug.mask,
             )
             eventCounter.incrementAndGet()
             lastCommittedEvent.set(out.event)
@@ -306,7 +315,7 @@ class MainActivity : AppCompatActivity() {
      * "original camera RGB + overlay".
      */
     private fun renderOverlayJpeg(
-        d: TpvDetectionDebug, crop: YuvAdapter.CropRect,
+        d: TpvDetectionDebugV2, crop: YuvAdapter.CropRect,
         nativeW: Int, nativeH: Int,
         eventClassId: Int, flicker: Boolean, nv21: ByteArray,
     ): ByteArray {
@@ -361,7 +370,7 @@ class MainActivity : AppCompatActivity() {
      * persist across frames that aren't themselves commits — per spec §9
      * "最近一次 COMMITTED 事件的摘要".
      */
-    private fun updateHud(live: TpvDetectionDebug, presence: FramePresence) {
+    private fun updateHud(live: TpvDetectionDebugV2, presence: FramePresence) {
         val now = System.nanoTime()
         fpsWin.addLast(now)
         while (fpsWin.size > fpsWindowSize) fpsWin.removeFirst()
@@ -429,6 +438,10 @@ class MainActivity : AppCompatActivity() {
             cpuMaxFreqKhz = readMaxCpuFreqKhz(),
             soSha256 = soSha256, modelDataSha256 = modelSha256,  // pre-computed
             nClasses = TpvNative.nClasses(), binThreshold = TpvNative.binThreshold(),
+            // T-v2.3 bridge: v2 meta fields use v1-equivalent defaults. Task 6
+            // wires real SettingsState values for darkObjectMode / ROI.
+            darkObjectMode = false,
+            roiX = 0, roiY = 0, roiW = 640, roiH = 480,
             nStable = s.n, kEmpty = s.k, mDriftPx = s.m,
             requestedW = 640, requestedH = 480,
             nativeW = nativeW, nativeH = nativeH,

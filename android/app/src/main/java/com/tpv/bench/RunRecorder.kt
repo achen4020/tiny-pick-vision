@@ -26,6 +26,10 @@ data class MetaInfo(
     val deviceModel: String, val androidLevel: Int, val abi: String, val cpuMaxFreqKhz: Long,
     val soSha256: String, val modelDataSha256: String,
     val nClasses: Int, val binThreshold: Int,
+    // v2 additions
+    val darkObjectMode: Boolean,
+    val roiX: Int, val roiY: Int, val roiW: Int, val roiH: Int,
+    // unchanged tail
     val nStable: Int, val kEmpty: Int, val mDriftPx: Int,
     val requestedW: Int, val requestedH: Int,
     val nativeW: Int, val nativeH: Int,
@@ -72,6 +76,10 @@ class RunRecorder(
             .put("model_data_sha256", meta.modelDataSha256)
             .put("n_classes", meta.nClasses)
             .put("bin_threshold", meta.binThreshold)
+            .put("dark_object_mode", meta.darkObjectMode)
+            .put("roi", JSONObject()
+                .put("x", meta.roiX).put("y", meta.roiY)
+                .put("w", meta.roiW).put("h", meta.roiH))
         val trigger = JSONObject()
             .put("n_stable", meta.nStable)
             .put("k_empty", meta.kEmpty)
@@ -87,6 +95,7 @@ class RunRecorder(
             .put("downsample_ratio_y", meta.downsampleRatioY)
         return JSONObject()
             .put("run_id", meta.runId)
+            .put("ui_version", "v2")
             .put("device", device)
             .put("tpv", tpv)
             .put("trigger", trigger)
@@ -96,12 +105,14 @@ class RunRecorder(
     fun recordEvent(
         event: CommittedEvent, triggerTsMs: Long,
         rawY: ByteArray, overlayJpeg: ByteArray,
+        mask: ByteArray,            // size must be 640*480/8 = 38400
     ) {
         val w = logWriter ?: error("RunRecorder.start() not called")
         val ls = logStream ?: error("RunRecorder.start() not called")
         val name = "%06d".format(event.eventIdx)
         File(runDir, "$name.y").writeBytes(rawY)
         File(runDir, "$name.jpg").writeBytes(overlayJpeg)
+        File(runDir, "$name.mask").writeBytes(mask)
 
         val d = event.triggerFrameDebug
         val det = JSONObject()
@@ -110,6 +121,11 @@ class RunRecorder(
             .put("x", d.det.x).put("y", d.det.y)
             .put("theta_x10", d.det.thetaX10)
             .put("confidence_q8", d.det.confidenceQ8)
+            .put("bbox", JSONObject()
+                .put("x", d.bbox.x).put("y", d.bbox.y)
+                .put("w", d.bbox.w).put("h", d.bbox.h))
+            .put("area_px", d.areaPx)
+            .put("grid_8x8", d.grid8x8)
 
         val huArr = JSONArray()
         for (v in d.features.hu) huArr.put("0x%08x".format(v))
@@ -128,6 +144,7 @@ class RunRecorder(
         val artifacts = JSONObject()
             .put("raw_y", "$name.y")
             .put("overlay", "$name.jpg")
+            .put("mask", "$name.mask")
 
         val line = JSONObject()
             .put("event_idx", event.eventIdx)

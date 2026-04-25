@@ -31,7 +31,7 @@ class OverlayView @JvmOverloads constructor(
 ) : View(context, attrs) {
 
     private data class LiveState(
-        val d: TpvDetectionDebug,
+        val d: TpvDetectionDebugV2,
         val crop: YuvAdapter.CropRect,
         val nativeW: Int, val nativeH: Int,
     )
@@ -56,7 +56,7 @@ class OverlayView @JvmOverloads constructor(
 
     /** Called every frame (~24 fps). NEVER touches commit/flash state. */
     fun updateLive(
-        d: TpvDetectionDebug, crop: YuvAdapter.CropRect,
+        d: TpvDetectionDebugV2, crop: YuvAdapter.CropRect,
         nativeW: Int, nativeH: Int,
     ) {
         live.set(LiveState(d, crop, nativeW, nativeH))
