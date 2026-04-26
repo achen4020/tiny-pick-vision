@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.View
 import java.util.concurrent.atomic.AtomicReference
@@ -26,7 +27,6 @@ class DiagnosticsView @JvmOverloads constructor(
 
     private data class State(
         val panels: DiagnosticsRenderer.Panels,
-        val statusLine: String,
     )
 
     private val latest = AtomicReference<State?>(null)
@@ -45,11 +45,11 @@ class DiagnosticsView @JvmOverloads constructor(
     @Volatile private var lastUpdateMs: Long = 0L
     private val throttleMs = 100L  // 10 Hz
 
-    fun update(panels: DiagnosticsRenderer.Panels, statusLine: String) {
-        val now = System.currentTimeMillis()
+    fun update(panels: DiagnosticsRenderer.Panels) {
+        val now = SystemClock.elapsedRealtime()
         if (now - lastUpdateMs < throttleMs) return
         lastUpdateMs = now
-        latest.set(State(panels, statusLine))
+        latest.set(State(panels))
         postInvalidate()
     }
 

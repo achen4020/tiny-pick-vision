@@ -25,7 +25,15 @@ object DiagnosticsRenderer {
     )
 
     /**
-     * @param rawY          current frame 640×480 Y buffer
+     * Build 6 diagnostic tiles from the latest frame.
+     *
+     * **Input dimensions are pinned to 640×480** by tpv's compile-time
+     * configuration (TPV_WIDTH/TPV_HEIGHT). Every literal `640`/`480` in
+     * this function reflects that single source of truth — if tpv ever
+     * supports a different working resolution, audit `render()` and
+     * `bitmapToTile`'s callers in lockstep with `tpv_config.h`.
+     *
+     * @param rawY          current frame 640×480 Y buffer (must be 307200 B)
      * @param d             latest detection (v2)
      * @param roi           ROI rect in 640×480 coords
      * @param lastEventMask last committed event's mask (null until first commit)
