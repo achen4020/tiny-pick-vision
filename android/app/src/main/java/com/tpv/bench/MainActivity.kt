@@ -12,6 +12,7 @@ import android.graphics.Rect
 import android.graphics.YuvImage
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.text.InputType
 import android.util.Log
 import android.view.View
@@ -29,6 +30,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
+import java.util.Arrays
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
@@ -106,6 +108,7 @@ class MainActivity : AppCompatActivity() {
      * Mask payload of the most recently committed event, for the 6th
      * DiagnosticsRenderer tile. Cleared on Clear/Start.
      */
+    // Safe to alias: tpv_jni.c does NewByteArray() per processFrameDebugV2 call, never reuses.
     @Volatile private var lastEventMask: ByteArray? = null
 
     /**
@@ -116,6 +119,20 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var activeSnapshot: SettingsSnapshot? = null
 
     @Volatile private var lastZip: File? = null
+
+    // Per-frame scratch buffers — owned by the camera.executor thread (onFrame
+    // is single-threaded on that executor), so plain fields are safe.
+    //   - yScratch: Y-plane copy buffer (640×480 = 307 200 B)
+    //   - timingScratch: 3-slot LongArray for JNI timing handoff (24 B)
+    //   - gapSortScratch: in-place sort buffer for recentGaps (≤30 entries, 240 B at cap)
+    // Replaces three per-frame allocations (~310 KB total) with one-shot ones.
+    private var yScratch: ByteArray = ByteArray(640 * 480)
+    private val timingScratch: LongArray = LongArray(3)
+    private var gapSortScratch: LongArray = LongArray(64)
+
+    // Throttle status_line String.format to ~10 Hz (HUD line is debug-only at
+    // 30 fps; full-rate updates are ~1 % CPU on lower-tier devices).
+    private var lastStatusLineMs: Long = 0L
 
     // Pre-computed in onStartClicked (UI thread) so the first onFrame()
     // callback isn't taxed with ~10ms of file+hash work — that pollutes
@@ -153,7 +170,7 @@ class MainActivity : AppCompatActivity() {
         btnExport.setOnClickListener { onExportClicked() }
         btnSettings.setOnClickListener { showSettingsDialog() }
         btnDiag.setOnClickListener { toggleDiagView() }
-        btnRoi.setOnClickListener { showSettingsDialog(focusTab = "roi") }
+        btnRoi.setOnClickListener { showSettingsDialog() }
         btnClear.setOnClickListener { onClearClicked() }
     }
 
@@ -193,6 +210,19 @@ class MainActivity : AppCompatActivity() {
         val runId = "run_${sdf.format(Date())}"
         val runDir = File(filesDir, "runs/$runId").apply { mkdirs() }
 
+        // Cross-field ROI validation (per-field clamps in SettingsState already
+        // enforce non-negative / ≤640 / ≤480; only the sum needs gating here).
+        val rX = settings.roiX ; val rY = settings.roiY
+        val rW = settings.roiW ; val rH = settings.roiH
+        if (rX + rW > 640 || rY + rH > 480) {
+            Toast.makeText(
+                this,
+                "ROI out of frame: x+w must ≤640, y+h must ≤480",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
         // Snapshot ALL v2 settings at the run boundary. Replays / analysis
         // only need this single snapshot (recorded into meta.json) — no
         // per-event ROI/threshold/dark_mode fields needed.
@@ -200,8 +230,7 @@ class MainActivity : AppCompatActivity() {
             n = settings.nStable, k = settings.kEmpty, m = settings.mDriftPx,
             binThreshold = settings.binThreshold,
             darkObjectMode = settings.darkObjectMode,
-            roiX = settings.roiX, roiY = settings.roiY,
-            roiW = settings.roiW, roiH = settings.roiH,
+            roiX = rX, roiY = rY, roiW = rW, roiH = rH,
         )
         activeSnapshot = snap
         lastRoi = YuvAdapter.CropRect(snap.roiX, snap.roiY, snap.roiW, snap.roiH)
@@ -289,8 +318,14 @@ class MainActivity : AppCompatActivity() {
                 recentGaps.addLast(gap)
                 while (recentGaps.size > 30) recentGaps.removeFirst()
                 if (recentGaps.size >= 5) {
-                    val sorted = recentGaps.toLongArray().sortedArray()
-                    val median = sorted[sorted.size / 2]
+                    // Reuse gapSortScratch instead of allocating a fresh
+                    // LongArray + sortedArray() copy each frame.
+                    val n = recentGaps.size
+                    if (gapSortScratch.size < n) gapSortScratch = LongArray(n)
+                    var i = 0
+                    for (g in recentGaps) { gapSortScratch[i] = g ; i++ }
+                    Arrays.sort(gapSortScratch, 0, n)
+                    val median = gapSortScratch[n / 2]
                     if (median > 0 && gap > median * SKIP_GAP_RATIO_NUM / SKIP_GAP_RATIO_DEN) {
                         val missed = (gap + median / 2) / median - 1
                         if (missed > 0) skippedCount.addAndGet(missed)
@@ -305,8 +340,12 @@ class MainActivity : AppCompatActivity() {
             // eventual .jpg. Both happen before we close the proxy.
             val yPlane = proxy.planes[0]
             val yBuf = yPlane.buffer
-            val yArr = ByteArray(yBuf.remaining()).also { yBuf.get(it) }
-            val adapted = yuv.extract(yArr, yPlane.rowStride, nativeW, nativeH)
+            val yLen = yBuf.remaining()
+            // Reuse yScratch (640×480 = 307 200 B) across frames; resize only
+            // if the plane unexpectedly grows (e.g. resolution renegotiation).
+            if (yScratch.size < yLen) yScratch = ByteArray(yLen)
+            yBuf.get(yScratch, 0, yLen)
+            val adapted = yuv.extract(yScratch, yPlane.rowStride, nativeW, nativeH)
             val nv21 = Yuv420ToNv21.convert(proxy)
             lastRawY = adapted.y
 
@@ -319,9 +358,12 @@ class MainActivity : AppCompatActivity() {
             // cleared in onStopClicked. If we somehow arrive here with no
             // snapshot (e.g. between Stop completion and a stray late frame),
             // bail — the `finally` block still closes the proxy.
+            // Safety here is by serial dispatch (camera.executor serializes onFrame
+            // and the teardown null-write submitted via executor.submit), NOT @Volatile.
             val snap = activeSnapshot ?: return
 
-            val timingBuf = LongArray(3)
+            // Reuse timingScratch (3-slot LongArray) instead of per-frame alloc.
+            val timingBuf = timingScratch
             val result = TpvNative.processFrameDebugV2(
                 adapted.y, 640, 480,
                 snap.binThreshold, snap.darkObjectMode,
@@ -515,18 +557,25 @@ class MainActivity : AppCompatActivity() {
 
         val st = trigger?.state ?: MachineState.IDLE
 
-        // Status line — live per-frame (PRESENT) or placeholders.
-        val statusText = if (presence == FramePresence.PRESENT) {
-            val theta = live.det.thetaX10 / 10.0
-            "size:%d [%d×%d] grid:%d rotation:%.1f°    FPS:%.1f skipped:%d".format(
-                live.areaPx, live.bbox.w, live.bbox.h, live.grid8x8,
-                theta, fps, skippedCount.get(),
-            )
-        } else {
-            "size:- [-×-] grid:- rotation:-°    FPS:%.1f skipped:%d".format(
-                fps, skippedCount.get(),
-            )
-        }
+        // status_line is throttled to ~10 Hz: at 30 fps the per-frame
+        // String.format() + UI write is wasted CPU (eyes can't read at
+        // 30 Hz anyway). HUD line uses simple concatenation so it stays
+        // per-frame.
+        val nowMs = SystemClock.elapsedRealtime()
+        val statusText: String? = if (nowMs - lastStatusLineMs >= 100L) {
+            lastStatusLineMs = nowMs
+            if (presence == FramePresence.PRESENT) {
+                val theta = live.det.thetaX10 / 10.0
+                "size:%d [%d×%d] grid:%d rotation:%.1f°    FPS:%.1f skipped:%d".format(
+                    live.areaPx, live.bbox.w, live.bbox.h, live.grid8x8,
+                    theta, fps, skippedCount.get(),
+                )
+            } else {
+                "size:- [-×-] grid:- rotation:-°    FPS:%.1f skipped:%d".format(
+                    fps, skippedCount.get(),
+                )
+            }
+        } else null
 
         // HUD — State + Events + Last event summary.
         val ev = lastCommittedEvent.get()
@@ -542,22 +591,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
         runOnUiThread {
-            statusLine.text = statusText
+            if (statusText != null) statusLine.text = statusText
             hud.text = hudMsg
         }
     }
 
     /**
      * v2 settings dialog with three sections (Trigger / Pipeline / ROI). All
-     * fields are run-locked: in-run invocations bail with a toast. The `focusTab`
-     * parameter is accepted for the ROI button hook but not visually honoured —
-     * all sections live together in one scrolling dialog.
+     * fields are run-locked: in-run invocations bail with a toast.
      */
-    private fun showSettingsDialog(focusTab: String = "trigger") {
+    private fun showSettingsDialog() {
         if (running.get()) { toast("Stop the run before changing settings") ; return }
-        // focusTab: reserved for future tabbed UI; currently all three sections
-        // share one dialog, so the value is informational only.
-        @Suppress("UNUSED_VARIABLE") val unusedFocus = focusTab
 
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL ; setPadding(32, 16, 32, 16)
@@ -619,15 +663,18 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Settings (run-locked)")
             .setView(container)
             .setPositiveButton("OK") { _, _ ->
-                settings.nStable        = nEt.text.toString().toIntOrNull()    ?: 3
-                settings.kEmpty         = kEt.text.toString().toIntOrNull()    ?: 5
-                settings.mDriftPx       = mEt.text.toString().toIntOrNull()    ?: 30
+                // Null-coalesce preserves the current value on parse failure
+                // (blank field, non-numeric text). In-field clamps in
+                // SettingsState are still the safety net for out-of-range ints.
+                settings.nStable        = nEt.text.toString().toIntOrNull()    ?: settings.nStable
+                settings.kEmpty         = kEt.text.toString().toIntOrNull()    ?: settings.kEmpty
+                settings.mDriftPx       = mEt.text.toString().toIntOrNull()    ?: settings.mDriftPx
                 settings.darkObjectMode = darkCb.isChecked
-                settings.binThreshold   = thrEt.text.toString().toIntOrNull()  ?: 128
-                settings.roiX           = roiXEt.text.toString().toIntOrNull() ?: 0
-                settings.roiY           = roiYEt.text.toString().toIntOrNull() ?: 0
-                settings.roiW           = roiWEt.text.toString().toIntOrNull() ?: 640
-                settings.roiH           = roiHEt.text.toString().toIntOrNull() ?: 480
+                settings.binThreshold   = thrEt.text.toString().toIntOrNull()  ?: settings.binThreshold
+                settings.roiX           = roiXEt.text.toString().toIntOrNull() ?: settings.roiX
+                settings.roiY           = roiYEt.text.toString().toIntOrNull() ?: settings.roiY
+                settings.roiW           = roiWEt.text.toString().toIntOrNull() ?: settings.roiW
+                settings.roiH           = roiHEt.text.toString().toIntOrNull() ?: settings.roiH
                 toast("Settings saved")
             }
             .setNegativeButton("Cancel", null)
