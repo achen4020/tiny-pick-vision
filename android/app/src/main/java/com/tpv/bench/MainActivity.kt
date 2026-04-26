@@ -12,8 +12,11 @@ import android.graphics.Rect
 import android.graphics.YuvImage
 import android.os.Build
 import android.os.Bundle
+import android.text.InputType
 import android.util.Log
+import android.view.View
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -44,10 +47,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var preview: PreviewView
     private lateinit var overlay: OverlayView
     private lateinit var hud: TextView
+    private lateinit var statusLine: TextView
+    private lateinit var diagView: DiagnosticsView
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
     private lateinit var btnExport: Button
     private lateinit var btnSettings: Button
+    private lateinit var btnDiag: Button
+    private lateinit var btnRoi: Button
+    private lateinit var btnClear: Button
 
     private var recorder: RunRecorder? = null
     private var trigger: TriggerMachine? = null
@@ -79,6 +87,34 @@ class MainActivity : AppCompatActivity() {
     private val lastCommittedEvent = AtomicReference<CommittedEvent?>(null)
     @Volatile private var lastTriggerTsMs: Long = 0L
 
+    /**
+     * Rolling latest raw Y frame (640×480), exposed for diagnostics. Written by
+     * the camera executor on every frame; read by DiagnosticsRenderer when the
+     * panel is visible. Volatile + array reference swap is safe enough for a
+     * snapshot-style consumer (we never mutate the array in place).
+     */
+    @Volatile private var lastRawY: ByteArray? = null
+
+    /**
+     * Snapshot of the active ROI (in 640×480 coords) for the current run. Set
+     * in onStartClicked from the SettingsSnapshot, read by OverlayView.updateLive
+     * and renderOverlayJpeg without re-touching SharedPreferences per frame.
+     */
+    @Volatile private var lastRoi: YuvAdapter.CropRect = YuvAdapter.CropRect(0, 0, 640, 480)
+
+    /**
+     * Mask payload of the most recently committed event, for the 6th
+     * DiagnosticsRenderer tile. Cleared on Clear/Start.
+     */
+    @Volatile private var lastEventMask: ByteArray? = null
+
+    /**
+     * Run-level snapshot of all v2 settings (binThreshold, darkObjectMode, ROI,
+     * trigger triple). Set on Start, consumed in onFrame and buildMeta. Null
+     * outside of a run.
+     */
+    @Volatile private var activeSnapshot: SettingsSnapshot? = null
+
     @Volatile private var lastZip: File? = null
 
     // Pre-computed in onStartClicked (UI thread) so the first onFrame()
@@ -102,15 +138,41 @@ class MainActivity : AppCompatActivity() {
         preview = findViewById(R.id.preview)
         overlay = findViewById(R.id.overlay)
         hud = findViewById(R.id.hud)
+        statusLine = findViewById(R.id.status_line)
+        diagView = findViewById(R.id.diag)
         btnStart = findViewById(R.id.btn_start)
         btnStop = findViewById(R.id.btn_stop)
         btnExport = findViewById(R.id.btn_export)
         btnSettings = findViewById(R.id.btn_settings)
+        btnDiag = findViewById(R.id.btn_diag)
+        btnRoi = findViewById(R.id.btn_roi)
+        btnClear = findViewById(R.id.btn_clear)
 
         btnStart.setOnClickListener { requestCameraAndStart() }
         btnStop.setOnClickListener { onStopClicked() }
         btnExport.setOnClickListener { onExportClicked() }
         btnSettings.setOnClickListener { showSettingsDialog() }
+        btnDiag.setOnClickListener { toggleDiagView() }
+        btnRoi.setOnClickListener { showSettingsDialog(focusTab = "roi") }
+        btnClear.setOnClickListener { onClearClicked() }
+    }
+
+    private fun toggleDiagView() {
+        diagView.visibility = if (diagView.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+    }
+
+    /** Wipe transient state (last event + diag tiles + overlay layers) without
+     *  touching the active run. Always enabled — useful both during a run (e.g.
+     *  to clear a stale flash) and idle. */
+    private fun onClearClicked() {
+        lastCommittedEvent.set(null)
+        lastEventMask = null
+        overlay.reset()
+        diagView.clear()
+        runOnUiThread {
+            hud.text = "State: ${trigger?.state ?: MachineState.IDLE}    Events: ${eventCounter.get()}\n" +
+                       "Last (no committed event yet)"
+        }
     }
 
     private fun requestCameraAndStart() {
@@ -130,9 +192,19 @@ class MainActivity : AppCompatActivity() {
             .apply { timeZone = TimeZone.getTimeZone("UTC") }
         val runId = "run_${sdf.format(Date())}"
         val runDir = File(filesDir, "runs/$runId").apply { mkdirs() }
-        val snapshotSettings = SettingsSnapshot(
-            settings.nStable, settings.kEmpty, settings.mDriftPx
+
+        // Snapshot ALL v2 settings at the run boundary. Replays / analysis
+        // only need this single snapshot (recorded into meta.json) — no
+        // per-event ROI/threshold/dark_mode fields needed.
+        val snap = SettingsSnapshot(
+            n = settings.nStable, k = settings.kEmpty, m = settings.mDriftPx,
+            binThreshold = settings.binThreshold,
+            darkObjectMode = settings.darkObjectMode,
+            roiX = settings.roiX, roiY = settings.roiY,
+            roiW = settings.roiW, roiH = settings.roiH,
         )
+        activeSnapshot = snap
+        lastRoi = YuvAdapter.CropRect(snap.roiX, snap.roiY, snap.roiW, snap.roiH)
 
         // Pre-compute once on UI thread so the first frame callback is fast.
         soSha256 = sha256Of(File(applicationInfo.nativeLibraryDir, "libtpv.so").readBytes())
@@ -141,18 +213,21 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { "unknown" }
 
         pendingInit.set { nativeW, nativeH, crop ->
-            val meta = buildMeta(runId, snapshotSettings, nativeW, nativeH, crop)
+            val meta = buildMeta(runId, snap, nativeW, nativeH, crop)
             recorder = RunRecorder(runDir, meta).also { it.start() }
         }
-        trigger = TriggerMachine(snapshotSettings.n, snapshotSettings.k, snapshotSettings.m)
+        trigger = TriggerMachine(snap.n, snap.k, snap.m)
         frameCounter.set(0) ; eventCounter.set(0) ; fpsWin.clear()
         skippedCount.set(0) ; lastArrivalNs = 0L ; recentGaps.clear()
-        lastCommittedEvent.set(null) ; overlay.reset()
+        lastCommittedEvent.set(null) ; lastEventMask = null
+        overlay.reset() ; diagView.clear()
 
         running.set(true)
         lockUi(true)
         camera.start(this, preview) { proxy -> onFrame(proxy) }
-        Log.i(TAG, "Started run $runId (recorder deferred until first frame)")
+        Log.i(TAG, "Started run $runId (v2, dark_mode=${snap.darkObjectMode}, " +
+                   "thr=${snap.binThreshold}, roi=${snap.roiX},${snap.roiY}," +
+                   "${snap.roiW},${snap.roiH})")
     }
 
     private fun onStopClicked() {
@@ -177,6 +252,7 @@ class MainActivity : AppCompatActivity() {
             val zip = recorder?.stopAndZip()
             recorder = null ; trigger = null
             pendingInit.set(null)
+            activeSnapshot = null
             lastZip = zip
             runOnUiThread {
                 lockUi(false)
@@ -195,124 +271,153 @@ class MainActivity : AppCompatActivity() {
         btnStart.isEnabled = !runActive
         btnStop.isEnabled = runActive
         btnSettings.isEnabled = !runActive
+        btnRoi.isEnabled = !runActive   // ROI also opens the run-locked dialog
+        // btnDiag, btnClear, btnExport: always enabled (Export gated separately)
     }
 
     /** Pipeline: camera frame → YuvAdapter (Y) + Yuv420ToNv21 (full NV21)
-     *              → JNI (timing + detection) → TriggerMachine
+     *              → JNI (timing + detection, snapshot params) → TriggerMachine
      *              → RunRecorder (timing always, event on commit)
-     *              → OverlayView (live + persistent commit state) */
+     *              → OverlayView (live + persistent commit state)
+     *              → DiagnosticsView (when visible) */
     private fun onFrame(proxy: androidx.camera.core.ImageProxy) {
         val tCamArrive = System.nanoTime()
-        // Update skipped-frame estimate from arrival gap vs. sliding median.
-        if (lastArrivalNs != 0L) {
-            val gap = tCamArrive - lastArrivalNs
-            recentGaps.addLast(gap)
-            while (recentGaps.size > 30) recentGaps.removeFirst()
-            if (recentGaps.size >= 5) {
-                val sorted = recentGaps.toLongArray().sortedArray()
-                val median = sorted[sorted.size / 2]
-                if (median > 0 && gap > median * SKIP_GAP_RATIO_NUM / SKIP_GAP_RATIO_DEN) {
-                    val missed = (gap + median / 2) / median - 1
-                    if (missed > 0) skippedCount.addAndGet(missed)
+        try {
+            // Update skipped-frame estimate from arrival gap vs. sliding median.
+            if (lastArrivalNs != 0L) {
+                val gap = tCamArrive - lastArrivalNs
+                recentGaps.addLast(gap)
+                while (recentGaps.size > 30) recentGaps.removeFirst()
+                if (recentGaps.size >= 5) {
+                    val sorted = recentGaps.toLongArray().sortedArray()
+                    val median = sorted[sorted.size / 2]
+                    if (median > 0 && gap > median * SKIP_GAP_RATIO_NUM / SKIP_GAP_RATIO_DEN) {
+                        val missed = (gap + median / 2) / median - 1
+                        if (missed > 0) skippedCount.addAndGet(missed)
+                    }
                 }
             }
-        }
-        lastArrivalNs = tCamArrive
+            lastArrivalNs = tCamArrive
 
-        val nativeW = proxy.width ; val nativeH = proxy.height
+            val nativeW = proxy.width ; val nativeH = proxy.height
 
-        // Extract the Y plane for tpv, AND collect the full NV21 for the
-        // eventual .jpg. Both happen before we close the proxy.
-        val yPlane = proxy.planes[0]
-        val yBuf = yPlane.buffer
-        val yArr = ByteArray(yBuf.remaining()).also { yBuf.get(it) }
-        val adapted = yuv.extract(yArr, yPlane.rowStride, nativeW, nativeH)
-        val nv21 = Yuv420ToNv21.convert(proxy)
+            // Extract the Y plane for tpv, AND collect the full NV21 for the
+            // eventual .jpg. Both happen before we close the proxy.
+            val yPlane = proxy.planes[0]
+            val yBuf = yPlane.buffer
+            val yArr = ByteArray(yBuf.remaining()).also { yBuf.get(it) }
+            val adapted = yuv.extract(yArr, yPlane.rowStride, nativeW, nativeH)
+            val nv21 = Yuv420ToNv21.convert(proxy)
+            lastRawY = adapted.y
 
-        // First-frame lazy init: now that we know nativeW/H + crop, write meta.json.
-        pendingInit.getAndSet(null)?.invoke(nativeW, nativeH, adapted.crop)
+            // First-frame lazy init: now that we know nativeW/H + crop, write meta.json.
+            pendingInit.getAndSet(null)?.invoke(nativeW, nativeH, adapted.crop)
 
-        val frameIdx = frameCounter.incrementAndGet().toLong()
+            val frameIdx = frameCounter.incrementAndGet().toLong()
 
-        val timingBuf = LongArray(3)
-        // TODO(T-v2.6): plumb darkObjectMode + binThreshold + roi from SettingsState snapshot
-        val result = TpvNative.processFrameDebugV2(
-            adapted.y, 640, 480,
-            TpvNative.binThreshold(), /*darkObjectMode=*/false,
-            /*roiX=*/0, /*roiY=*/0, /*roiW=*/640, /*roiH=*/480,
-            timingBuf,
-        )
-        val tJniReturn = System.nanoTime()
+            // Snapshot guard. activeSnapshot is set in onStartClicked and
+            // cleared in onStopClicked. If we somehow arrive here with no
+            // snapshot (e.g. between Stop completion and a stray late frame),
+            // bail — the `finally` block still closes the proxy.
+            val snap = activeSnapshot ?: return
 
-        // Compute presence BEFORE recordFrameTiming so we can honour the
-        // FrameTiming contract: tpvClassId must be -1 for DROP frames
-        // (spec §5.6 / plan type header). For TPV_OK/TPV_EMPTY the classId
-        // is meaningful; for SCENE_ERROR/BAD_INPUT tpv never looked at
-        // pixels, so classId has no semantics.
-        val presence = when {
-            result.det.status == 0 -> FramePresence.PRESENT       // TPV_OK (any class_id)
-            result.det.status == 1 -> FramePresence.EMPTY         // TPV_EMPTY
-            else -> FramePresence.DROP                            // SCENE_ERROR, BAD_INPUT
-        }
-        val timingClassId = if (presence == FramePresence.DROP) -1 else result.det.classId
-
-        recorder?.recordFrameTiming(FrameTiming(
-            frameIdxInRun = frameIdx,
-            tpvStatus = result.det.status, tpvClassId = timingClassId,
-            tCameraArriveNs = tCamArrive,
-            tJniEnterNs  = timingBuf[0],    // JNI entry, C side
-            tTpvEnterNs  = timingBuf[1],    // immediately before tpv_process_frame_debug
-            tTpvExitNs   = timingBuf[2],    // immediately after  tpv_process_frame_debug
-            tJniReturnNs = tJniReturn       // back in Kotlin
-        ))
-        val obs = FrameObservation(
-            presence = presence,
-            x = if (presence == FramePresence.PRESENT) result.det.x else 0,
-            y = if (presence == FramePresence.PRESENT) result.det.y else 0,
-            classId = if (presence == FramePresence.PRESENT) result.det.classId else -1,
-            frameIdxInRun = frameIdx,
-            detection = if (presence == FramePresence.PRESENT) result else null,
-        )
-        val out = trigger?.onFrame(obs) ?: StateMachineOutput.None
-
-        if (out is StateMachineOutput.Commit) {
-            val triggerTsMs = System.currentTimeMillis()
-            val jpg = renderOverlayJpeg(
-                d = out.event.triggerFrameDebug, crop = adapted.crop,
-                nativeW = nativeW, nativeH = nativeH,
-                eventClassId = out.event.eventClassId, flicker = out.event.flicker,
-                nv21 = nv21,
+            val timingBuf = LongArray(3)
+            val result = TpvNative.processFrameDebugV2(
+                adapted.y, 640, 480,
+                snap.binThreshold, snap.darkObjectMode,
+                snap.roiX, snap.roiY, snap.roiW, snap.roiH,
+                timingBuf,
             )
-            recorder?.recordEvent(
-                out.event, triggerTsMs = triggerTsMs,
-                rawY = adapted.y, overlayJpeg = jpg,
-                mask = out.event.triggerFrameDebug.mask,
-            )
-            eventCounter.incrementAndGet()
-            lastCommittedEvent.set(out.event)
-            lastTriggerTsMs = triggerTsMs
-            overlay.onCommit(out.event.eventClassId, out.event.flicker)
-        }
+            val tJniReturn = System.nanoTime()
 
-        // Only paint a live marker on PRESENT frames. On TPV_EMPTY /
-        // SCENE_ERROR / BAD_INPUT the C side zero-fills det, so rendering
-        // would otherwise draw a bogus (0,0) class-0 dot. clearLive()
-        // drops only the live layer — commit state + 300 ms flash survive.
-        if (presence == FramePresence.PRESENT) {
-            // TODO(T-v2.6): wire ROI from SettingsState (currently hard-coded full-frame)
-            val overlayRoi = YuvAdapter.CropRect(0, 0, 640, 480)
-            overlay.updateLive(result, overlayRoi, adapted.crop, nativeW, nativeH)
-        } else {
-            overlay.clearLive()
+            // Compute presence BEFORE recordFrameTiming so we can honour the
+            // FrameTiming contract: tpvClassId must be -1 for DROP frames
+            // (spec §5.6 / plan type header). For TPV_OK/TPV_EMPTY the classId
+            // is meaningful; for SCENE_ERROR/BAD_INPUT tpv never looked at
+            // pixels, so classId has no semantics.
+            val presence = when {
+                result.det.status == 0 -> FramePresence.PRESENT       // TPV_OK (any class_id)
+                result.det.status == 1 -> FramePresence.EMPTY         // TPV_EMPTY
+                else -> FramePresence.DROP                            // SCENE_ERROR, BAD_INPUT
+            }
+            val timingClassId = if (presence == FramePresence.DROP) -1 else result.det.classId
+
+            recorder?.recordFrameTiming(FrameTiming(
+                frameIdxInRun = frameIdx,
+                tpvStatus = result.det.status, tpvClassId = timingClassId,
+                tCameraArriveNs = tCamArrive,
+                tJniEnterNs  = timingBuf[0],    // JNI entry, C side
+                tTpvEnterNs  = timingBuf[1],    // immediately before tpv_process_frame_debug
+                tTpvExitNs   = timingBuf[2],    // immediately after  tpv_process_frame_debug
+                tJniReturnNs = tJniReturn       // back in Kotlin
+            ))
+            val obs = FrameObservation(
+                presence = presence,
+                x = if (presence == FramePresence.PRESENT) result.det.x else 0,
+                y = if (presence == FramePresence.PRESENT) result.det.y else 0,
+                classId = if (presence == FramePresence.PRESENT) result.det.classId else -1,
+                frameIdxInRun = frameIdx,
+                detection = if (presence == FramePresence.PRESENT) result else null,
+            )
+            val out = trigger?.onFrame(obs) ?: StateMachineOutput.None
+
+            if (out is StateMachineOutput.Commit) {
+                val triggerTsMs = System.currentTimeMillis()
+                val jpg = renderOverlayJpeg(
+                    d = out.event.triggerFrameDebug, crop = adapted.crop,
+                    nativeW = nativeW, nativeH = nativeH,
+                    eventClassId = out.event.eventClassId, flicker = out.event.flicker,
+                    nv21 = nv21,
+                )
+                recorder?.recordEvent(
+                    out.event, triggerTsMs = triggerTsMs,
+                    rawY = adapted.y, overlayJpeg = jpg,
+                    mask = out.event.triggerFrameDebug.mask,
+                )
+                eventCounter.incrementAndGet()
+                lastCommittedEvent.set(out.event)
+                lastEventMask = out.event.triggerFrameDebug.mask
+                lastTriggerTsMs = triggerTsMs
+                overlay.onCommit(out.event.eventClassId, out.event.flicker)
+            }
+
+            // Only paint a live marker on PRESENT frames. On TPV_EMPTY /
+            // SCENE_ERROR / BAD_INPUT the C side zero-fills det, so rendering
+            // would otherwise draw a bogus (0,0) class-0 dot. clearLive()
+            // drops only the live layer — commit state + 300 ms flash survive.
+            if (presence == FramePresence.PRESENT) {
+                overlay.updateLive(result, lastRoi, adapted.crop, nativeW, nativeH)
+            } else {
+                overlay.clearLive()
+            }
+
+            // Diagnostics panel: only render when actually visible. The
+            // renderer + 6 IntArrays are not free (~250 KB / call); skipping
+            // when hidden saves CPU while preserving the same per-frame data
+            // path. DiagnosticsView itself further throttles to 10 Hz.
+            if (diagView.visibility == View.VISIBLE) {
+                val panels = DiagnosticsRenderer.render(
+                    adapted.y, result, lastRoi, lastEventMask,
+                )
+                diagView.update(panels)
+            }
+
+            updateHud(result, presence)
+        } finally {
+            proxy.close()
         }
-        updateHud(result, presence)
     }
 
     /**
      * Real RGB overlay JPEG, built from the trigger frame's NV21. Path:
      * NV21 → YuvImage.compressToJpeg() → Bitmap (ARGB) → Canvas draw
-     * overlay → Bitmap.compress(JPEG, 85). Fully honours spec §5.5's
-     * "original camera RGB + overlay".
+     * mask + ROI + center dot + axis + 2-line text → JPEG-85.
+     *
+     * v2 (T-v2.6): paints the same primitives as OverlayView v2 — green mask
+     * fill, yellow ROI rectangle, red center dot, short axis line. The two
+     * legacy text lines are kept so the saved JPG is self-describing without
+     * needing the matching log.jsonl entry. v1's class-coloured circle is
+     * dropped in favour of the v2 red dot for parity with the on-screen view.
      */
     private fun renderOverlayJpeg(
         d: TpvDetectionDebugV2, crop: YuvAdapter.CropRect,
@@ -333,27 +438,54 @@ class MainActivity : AppCompatActivity() {
                Bitmap.createBitmap(nativeW, nativeH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
 
-        // Step 3: overlay annotations — same rules as OverlayView (§5.5)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE ; strokeWidth = 4f
-            color = OverlayPainter.colorFor(d.det.classId)
-        }
-        val (nx, ny) = OverlayPainter.mapCoord(d.det.x, d.det.y, crop)
-        canvas.drawCircle(
-            nx.toFloat(), ny.toFloat(),
-            OverlayPainter.circleRadius(crop).toFloat(), paint
-        )
-        val axisLen = OverlayPainter.axisLength(crop).toFloat()
-        val th = Math.toRadians(d.det.thetaX10 / 10.0)
-        canvas.drawLine(
-            nx.toFloat(), ny.toFloat(),
-            (nx + axisLen * cos(th)).toFloat(),
-            (ny + axisLen * sin(th)).toFloat(),
-            paint
+        // Step 3a: green mask fill (v2). One-shot allocations are fine here:
+        // renderOverlayJpeg only runs on commits, not per frame.
+        val maskPixels = OverlayPainter.decodeMaskToArgb(
+            d.mask, 640, 480, OverlayPainter.GREEN_MASK_ARGB)
+        val maskBmp = Bitmap.createBitmap(maskPixels, 640, 480, Bitmap.Config.ARGB_8888)
+        canvas.drawBitmap(
+            maskBmp, null,
+            Rect(crop.x, crop.y, crop.x + crop.w, crop.y + crop.h), null
         )
 
+        // Step 3b: yellow ROI rectangle, mapped from 640×480 → native coords.
+        val roiPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE ; strokeWidth = 4f
+            this.color = OverlayPainter.YELLOW_ROI_ARGB
+        }
+        val (rnx0, rny0) = OverlayPainter.mapCoord(lastRoi.x, lastRoi.y, crop)
+        val (rnx1, rny1) = OverlayPainter.mapCoord(
+            lastRoi.x + lastRoi.w, lastRoi.y + lastRoi.h, crop)
+        canvas.drawRect(
+            rnx0.toFloat(), rny0.toFloat(), rnx1.toFloat(), rny1.toFloat(), roiPaint
+        )
+
+        // Step 3c: red center dot + short axis line — mirror OverlayView v2.
+        val centerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            this.color = OverlayPainter.RED_CENTER_ARGB
+        }
+        val axisPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE ; strokeWidth = 3f
+            this.color = OverlayPainter.RED_CENTER_ARGB
+        }
+        val (nx, ny) = OverlayPainter.mapCoord(d.det.x, d.det.y, crop)
+        val cx = nx.toFloat() ; val cy = ny.toFloat()
+        val dotR = (crop.w * 0.015f).coerceAtLeast(4f)
+        canvas.drawCircle(cx, cy, dotR, centerPaint)
+        val axisLen = (crop.w * 0.04f).coerceAtLeast(8f)
+        val thetaRad = Math.toRadians(d.det.thetaX10 / 10.0)
+        canvas.drawLine(
+            cx, cy,
+            (cx + axisLen * cos(thetaRad)).toFloat(),
+            (cy + axisLen * sin(thetaRad)).toFloat(),
+            axisPaint
+        )
+
+        // Step 3d: two HUD-like text lines so the JPG is self-describing
+        // even if the matching log.jsonl entry is unavailable.
         val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            textSize = 48f ; color = paint.color
+            textSize = 48f ; color = OverlayPainter.colorFor(d.det.classId)
         }
         canvas.drawText(OverlayPainter.textLine1(d), 16f, 64f, textPaint)
         textPaint.color = OverlayPainter.GREY_NEUTRAL
@@ -366,9 +498,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * HUD rendering. The "Last" lines read from `lastCommittedEvent` and
-     * persist across frames that aren't themselves commits — per spec §9
+     * HUD + status_line rendering. The "Last" lines read from `lastCommittedEvent`
+     * and persist across frames that aren't themselves commits — per spec §9
      * "最近一次 COMMITTED 事件的摘要".
+     *
+     * v2 (T-v2.6): status_line shows live per-frame metrics (size/bbox/grid/θ
+     * + FPS + skipped); HUD condenses to State + Events + Last event summary.
      */
     private fun updateHud(live: TpvDetectionDebugV2, presence: FramePresence) {
         val now = System.nanoTime()
@@ -379,53 +514,134 @@ class MainActivity : AppCompatActivity() {
         } else 0.0
 
         val st = trigger?.state ?: MachineState.IDLE
+
+        // Status line — live per-frame (PRESENT) or placeholders.
+        val statusText = if (presence == FramePresence.PRESENT) {
+            val theta = live.det.thetaX10 / 10.0
+            "size:%d [%d×%d] grid:%d rotation:%.1f°    FPS:%.1f skipped:%d".format(
+                live.areaPx, live.bbox.w, live.bbox.h, live.grid8x8,
+                theta, fps, skippedCount.get(),
+            )
+        } else {
+            "size:- [-×-] grid:- rotation:-°    FPS:%.1f skipped:%d".format(
+                fps, skippedCount.get(),
+            )
+        }
+
+        // HUD — State + Events + Last event summary.
         val ev = lastCommittedEvent.get()
-        val msg = buildString {
-            append("State: $st   FPS: %.1f   skipped: %d\n".format(
-                fps, skippedCount.get()))
-            append("Events: ${eventCounter.get()}\n")
+        val hudMsg = buildString {
+            append("State: $st    Events: ${eventCounter.get()}\n")
             if (ev != null) {
                 val d = ev.triggerFrameDebug
-                append("Last ${OverlayPainter.textLine1(d)}\n")
-                append("Last ${OverlayPainter.textLine2(ev.eventClassId, ev.flicker)}" +
-                       "  x=${d.det.x} y=${d.det.y} θ=${d.det.thetaX10/10.0}")
+                append("Last event#${ev.eventIdx}: cls=${ev.eventClassId} ")
+                append("flicker=${ev.flicker} size=${d.areaPx} ")
+                append("θ=%.1f°".format(d.det.thetaX10 / 10.0))
             } else {
-                append("Last (no committed event yet)\n")
-                // Fallback line: on EMPTY/DROP the `live` struct is zero-filled,
-                // so textLine1(live) would print misleading det_cls=0 conf=0.
-                if (presence == FramePresence.PRESENT) {
-                    append("Live ${OverlayPainter.textLine1(live)}")
-                } else {
-                    append("Live (nothing in view)")
-                }
+                append("Last (no committed event yet)")
             }
         }
-        runOnUiThread { hud.text = msg }
+        runOnUiThread {
+            statusLine.text = statusText
+            hud.text = hudMsg
+        }
     }
 
-    private fun showSettingsDialog() {
+    /**
+     * v2 settings dialog with three sections (Trigger / Pipeline / ROI). All
+     * fields are run-locked: in-run invocations bail with a toast. The `focusTab`
+     * parameter is accepted for the ROI button hook but not visually honoured —
+     * all sections live together in one scrolling dialog.
+     */
+    private fun showSettingsDialog(focusTab: String = "trigger") {
         if (running.get()) { toast("Stop the run before changing settings") ; return }
-        val ll = LinearLayout(this).apply {
+        // focusTab: reserved for future tabbed UI; currently all three sections
+        // share one dialog, so the value is informational only.
+        @Suppress("UNUSED_VARIABLE") val unusedFocus = focusTab
+
+        val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL ; setPadding(32, 16, 32, 16)
         }
-        val nEt = EditText(this).apply { setText(settings.nStable.toString()) ; hint = "N_stable" }
-        val kEt = EditText(this).apply { setText(settings.kEmpty.toString()) ; hint = "K_empty" }
-        val mEt = EditText(this).apply { setText(settings.mDriftPx.toString()) ; hint = "M_drift_px" }
-        ll.addView(nEt) ; ll.addView(kEt) ; ll.addView(mEt)
+        fun sectionHeader(title: String) = TextView(this).apply {
+            text = title ; textSize = 16f ; setPadding(0, 16, 0, 8)
+        }
+
+        // ---- Trigger ----
+        container.addView(sectionHeader("Trigger"))
+        val nEt = EditText(this).apply {
+            setText(settings.nStable.toString()) ; hint = "N_stable"
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        val kEt = EditText(this).apply {
+            setText(settings.kEmpty.toString()) ; hint = "K_empty"
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        val mEt = EditText(this).apply {
+            setText(settings.mDriftPx.toString()) ; hint = "M_drift_px"
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        container.addView(nEt) ; container.addView(kEt) ; container.addView(mEt)
+
+        // ---- Pipeline ----
+        container.addView(sectionHeader("Pipeline"))
+        val darkCb = CheckBox(this).apply {
+            text = "Dark object mode (Y < threshold = fg)"
+            isChecked = settings.darkObjectMode
+        }
+        val thrEt = EditText(this).apply {
+            setText(settings.binThreshold.toString()) ; hint = "bin_threshold (0-255)"
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        container.addView(darkCb) ; container.addView(thrEt)
+
+        // ---- ROI (640×480 coords; defaults = full frame) ----
+        container.addView(sectionHeader("ROI"))
+        val roiXEt = EditText(this).apply {
+            setText(settings.roiX.toString()) ; hint = "x (0-639)"
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        val roiYEt = EditText(this).apply {
+            setText(settings.roiY.toString()) ; hint = "y (0-479)"
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        val roiWEt = EditText(this).apply {
+            setText(settings.roiW.toString()) ; hint = "w (1-640)"
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        val roiHEt = EditText(this).apply {
+            setText(settings.roiH.toString()) ; hint = "h (1-480)"
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        container.addView(roiXEt) ; container.addView(roiYEt)
+        container.addView(roiWEt) ; container.addView(roiHEt)
+
         AlertDialog.Builder(this)
-            .setTitle("Trigger Settings")
-            .setView(ll)
+            .setTitle("Settings (run-locked)")
+            .setView(container)
             .setPositiveButton("OK") { _, _ ->
-                settings.nStable = nEt.text.toString().toIntOrNull() ?: 3
-                settings.kEmpty = kEt.text.toString().toIntOrNull() ?: 5
-                settings.mDriftPx = mEt.text.toString().toIntOrNull() ?: 30
+                settings.nStable        = nEt.text.toString().toIntOrNull()    ?: 3
+                settings.kEmpty         = kEt.text.toString().toIntOrNull()    ?: 5
+                settings.mDriftPx       = mEt.text.toString().toIntOrNull()    ?: 30
+                settings.darkObjectMode = darkCb.isChecked
+                settings.binThreshold   = thrEt.text.toString().toIntOrNull()  ?: 128
+                settings.roiX           = roiXEt.text.toString().toIntOrNull() ?: 0
+                settings.roiY           = roiYEt.text.toString().toIntOrNull() ?: 0
+                settings.roiW           = roiWEt.text.toString().toIntOrNull() ?: 640
+                settings.roiH           = roiHEt.text.toString().toIntOrNull() ?: 480
                 toast("Settings saved")
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private data class SettingsSnapshot(val n: Int, val k: Int, val m: Int)
+    /** Run-level settings snapshot — captures everything the C-side and recorder
+     *  must agree on for the duration of a single run. */
+    private data class SettingsSnapshot(
+        val n: Int, val k: Int, val m: Int,
+        val binThreshold: Int,
+        val darkObjectMode: Boolean,
+        val roiX: Int, val roiY: Int, val roiW: Int, val roiH: Int,
+    )
 
     private fun buildMeta(
         runId: String, s: SettingsSnapshot,
@@ -437,10 +653,10 @@ class MainActivity : AppCompatActivity() {
             abi = Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown",
             cpuMaxFreqKhz = readMaxCpuFreqKhz(),
             soSha256 = soSha256, modelDataSha256 = modelSha256,  // pre-computed
-            nClasses = TpvNative.nClasses(), binThreshold = TpvNative.binThreshold(),
-            // TODO(T-v2.6): plumb darkObjectMode + binThreshold + roi from SettingsState snapshot
-            darkObjectMode = false,
-            roiX = 0, roiY = 0, roiW = 640, roiH = 480,
+            nClasses = TpvNative.nClasses(),
+            binThreshold = s.binThreshold,
+            darkObjectMode = s.darkObjectMode,
+            roiX = s.roiX, roiY = s.roiY, roiW = s.roiW, roiH = s.roiH,
             nStable = s.n, kEmpty = s.k, mDriftPx = s.m,
             requestedW = 640, requestedH = 480,
             nativeW = nativeW, nativeH = nativeH,
