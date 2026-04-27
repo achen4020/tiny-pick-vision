@@ -381,3 +381,65 @@ python3 tools/analyze_timing.py /tmp/run/timing.bin
 
 Prints p50/p95/p99 of `tpv_process_frame_debug` nanosecond latency, with
 PASS/FAIL against the 30 ms p95 gate.
+
+### v2 upgrade (2026-04-24)
+
+The bench APP was upgraded from v1 to v2; see
+`docs/specs/2026-04-24-bench-app-v2-mask-overlay-design.md` and
+`docs/plans/2026-04-24-bench-app-v2-mask-overlay-plan.md`.
+
+**What v2 adds on-screen:**
+- Green translucent mask fill on the detected blob (replaces the v1 circle)
+- Yellow ROI rectangle
+- Status line above preview: `size:N [w×h] grid:M rotation:θ°`
+- `Diag` button toggles a 2×3 panel of pipeline intermediate stages
+  (raw Y / ROI dim / binarized / all CCL blobs / winning blob / last event)
+- `ROI` button opens Settings to edit the ROI rect (Settings now run-locked)
+- `Clear` button resets lastCommittedEvent + overlay + diag state
+
+**New algorithm inputs (run-locked):**
+- `binThreshold`: 0..255 cutoff (default 128)
+- `darkObjectMode`: `true` means Y < threshold is foreground (default `true`;
+  set for white-background-dark-object test scenes)
+- `roi`: ROI rectangle in 640×480 coords (default full frame)
+
+All are snapshotted at Start and written to `meta.json.tpv.{bin_threshold, dark_object_mode, roi}`.
+
+**New per-event artifact:**
+- `NNNNNN.mask` — 38400 B raw bitmap, LSB-first packed, 640×480. Set bits =
+  winning blob pixels. Visualize with:
+
+```bash
+python3 tools/visualize_mask.py run/000001.mask
+# → run/000001.png
+```
+
+**build/replay v1 vs v2 mode:**
+
+| Mode | Triggered by | Algorithm | Threshold/ROI/dark source |
+|---|---|---|---|
+| v1 | `meta.json` missing or `ui_version` ≠ `"v2"`, or `--v1` flag | `tpv_process_frame` | compiled `tpv_bin_threshold`, no ROI, no dark mode |
+| v2 | `meta.json.ui_version == "v2"`, or `--v2` flag | `tpv_process_frame_debug_v2` | from `meta.json.tpv.*`; CLI `--bin-threshold / --dark-object-mode / --roi x,y,w,h` override |
+
+Example — replay a v2 run:
+```bash
+adb exec-out run-as com.tpv.bench cat files/runs/run_2026-04-24T07:30:00Z.zip > run.zip
+unzip run.zip -d /tmp/run
+./build/replay /tmp/run
+```
+
+**Calibration data and dark_object_mode:**
+
+`src/model_data.c` is produced by PC-side `tools/calibrate` against a set
+of training frames. The dark_object_mode setting used at calibration time
+must match the setting used at run time. If you calibrate with bright
+objects on dark background and then set `darkObjectMode=true` in the APP,
+the model's Mahalanobis distance parameters will be meaningless. DEVELOPER
+workflow: decide the physical scene first (dark-bg-bright-obj vs
+bright-bg-dark-obj), then collect training frames, then set the matching
+darkObjectMode in the APP's Settings before Start.
+
+**Backward compatibility:**
+- v2 APP continues to parse v1 runs (no `ui_version` in meta.json)
+- v1 replay mode remains bit-identical to original v1 behavior
+- HG1-5 C tests and the 20 KB size gate are unchanged
