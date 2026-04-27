@@ -8,6 +8,7 @@ package com.tpv.bench
 object OverlayPainter {
 
     data class NativeSize(val w: Int, val h: Int)
+    data class ViewTransform(val scale: Float, val offsetX: Float, val offsetY: Float)
 
     /** 5-class palette (tab10 first 5, #3 swapped to brown to avoid RED_ERR collision). */
     val PALETTE = intArrayOf(
@@ -89,6 +90,28 @@ object OverlayPainter {
         val ny = crop.y + (y640.toDouble() * crop.h / 480.0).toInt()
         return nx to ny
     }
+
+    /**
+     * PreviewView's fillCenter scale type uses a uniform scale that fills the
+     * destination and center-crops the overflow. The live overlay must use the
+     * same transform; independently scaling X/Y makes the mask look vertically
+     * shifted on wide landscape tablets.
+     */
+    fun previewFillCenterTransform(
+        viewW: Int, viewH: Int,
+        nativeW: Int, nativeH: Int,
+    ): ViewTransform {
+        require(viewW > 0 && viewH > 0 && nativeW > 0 && nativeH > 0)
+        val scale = maxOf(viewW.toFloat() / nativeW, viewH.toFloat() / nativeH)
+        return ViewTransform(
+            scale = scale,
+            offsetX = (viewW - nativeW * scale) * 0.5f,
+            offsetY = (viewH - nativeH * scale) * 0.5f,
+        )
+    }
+
+    fun mapNativeToView(x: Int, y: Int, t: ViewTransform): Pair<Float, Float> =
+        (t.offsetX + x * t.scale) to (t.offsetY + y * t.scale)
 
     /** Line 1 text per §5.5 three-branch rule. */
     fun textLine1(d: TpvDetectionDebugV2): String {

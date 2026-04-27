@@ -27,6 +27,28 @@ class OverlayPainterTest {
     }
 
     @Test
+    fun `fillCenter transform center-crops wide landscape view`() {
+        val t = OverlayPainter.previewFillCenterTransform(
+            viewW = 3040, viewH = 1752,
+            nativeW = 640, nativeH = 480,
+        )
+        assertEquals(4.75f, t.scale, 0.001f)
+        assertEquals(0f, t.offsetX, 0.001f)
+        assertEquals(-264f, t.offsetY, 0.001f)
+    }
+
+    @Test
+    fun `fillCenter transform maps native center to view center`() {
+        val t = OverlayPainter.previewFillCenterTransform(
+            viewW = 3040, viewH = 1752,
+            nativeW = 640, nativeH = 480,
+        )
+        val (vx, vy) = OverlayPainter.mapNativeToView(320, 240, t)
+        assertEquals(1520f, vx, 0.001f)
+        assertEquals(876f, vy, 0.001f)
+    }
+
+    @Test
     fun `ACCEPTED uses class palette`() {
         val color = OverlayPainter.colorFor(detClsId = 2)
         assertEquals(OverlayPainter.PALETTE[2], color)

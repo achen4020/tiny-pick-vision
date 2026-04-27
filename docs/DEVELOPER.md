@@ -349,11 +349,12 @@ back camera one at a time. HUD shows state, FPS, event count. Tap Stop —
 toast shows the zip filename.
 
 The Activity is locked to **landscape** orientation. The back camera
-buffer is 640×480 landscape and `OverlayView` uses direct
-`width / nativeW` / `height / nativeH` scaling, so aligning the Activity
-to the sensor axes avoids a rotation mismatch. CameraX also returns a
-clean 640×480 buffer in landscape rather than a swapped 480×640 that
-would trip tpv's dimension check.
+buffer is 640×480 landscape and `PreviewView` is explicitly `fillCenter`.
+`OverlayView` mirrors that same uniform center-crop transform instead of
+independent X/Y scaling, so masks/dots stay aligned on wide landscape
+tablets. The landscape lock avoids a rotation mismatch; if portrait is ever
+allowed, thread `ImageProxy.imageInfo.rotationDegrees` through the overlay
+mapping and update the v2 spec in lockstep.
 
 ### Retrieve a run
 
@@ -405,9 +406,32 @@ The bench APP was upgraded from v1 to v2; see
 
 All are snapshotted at Start and written to `meta.json.tpv.{bin_threshold, dark_object_mode, roi}`.
 
+**v2 debug segmentation note:**
+
+`tpv_process_frame_debug_v2` uses the UI threshold as a strong seed
+threshold, then applies a small hysteresis expansion before CCL: weak
+foreground is computed with a ±48 relaxed threshold, and only weak connected
+components containing at least one strong seed survive. This keeps the v1
+production path unchanged while making the bench overlay robust to glossy or
+printed dark objects whose highlights split a single physical object under a
+single hard threshold. If the relaxed weak threshold produces too many tiny
+components for CCL, v2 falls back to the original strong-threshold mask rather
+than returning `TPV_SCENE_ERROR`. Bench-debug filtering also drops components
+touching the frame border; when all valid components classify as rejected
+(common with stub `model_data.c`), v2 chooses the largest valid component
+instead of the first/min-distance rejected edge artifact. The final displayed
+mask starts from a stricter display core (`threshold - 32` in dark-object mode,
+or `threshold + 32` in bright-object mode) inside the selected anchor plus
+nearby non-border components, then fills row/column spans. If that strict core
+is too sparse (`< TPV_AMIN` pixels), v2 falls back to the normal strong seed.
+This keeps glossy split objects visually connected while reducing cast-shadow
+spill; it deliberately avoids whole-bbox fill so sloped edges and rounded
+corners do not spill onto the background.
+
 **New per-event artifact:**
 - `NNNNNN.mask` — 38400 B raw bitmap, LSB-first packed, 640×480. Set bits =
-  winning blob pixels. Visualize with:
+  final display mask after v2 hysteresis selection, strict-core shadow trim,
+  and row/column span filling. Visualize with:
 
 ```bash
 python3 tools/visualize_mask.py run/000001.mask

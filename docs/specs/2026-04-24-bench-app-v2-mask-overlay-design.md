@@ -203,11 +203,17 @@ ROI 默认值由 APP 传（spec §6.4 定义）；若 APP 传 `{0, 0, 640, 480}`
 
 | 位图 | 1 bit 像素的意义 |
 |---|---|
-| `bin[]` | 被 `threshold_v2` 判为前景、**且** 在 ROI 内（ROI 外强制 0）——就是实际送进 CCL 的那一份 |
+| `bin[]` | v2 debug 的有效候选前景：先用 UI 阈值得到 strong seed，再用 ±48 relaxed threshold 得到 weak foreground，只保留“包含至少一个 strong seed 的 weak CCL 连通域”，丢弃接触画面边缘的连通域，且 ROI 外强制 0——就是实际用于 winner/mask 的那一份；若 weak CCL 因噪声过多溢出，则 fallback 到 strong seed bin |
 | `all_blobs_mask[]` | `bin[]` 的子集；仅包含被 CCL 成功分配 label 且触发成功（`ccl_moments` 返回 ≥ 0）的前景像素。`ccl_moments` 返回 `-1`（label 溢出 / scene_error）时**整张清零**；`TPV_EMPTY` 或 `TPV_BAD_INPUT` 时也整张清零 |
-| `mask[]` | `all_blobs_mask[]` 的子集；仅包含最终 winner blob 的 label 对应像素。`rc != TPV_OK` 时整张清零 |
+| `mask[]` | `all_blobs_mask[]` 的子集；先在最终 winner anchor 及其附近、非贴边、同物体候选 label 内取 stricter display core（dark mode 用 `threshold - 32`，bright mode 用 `threshold + 32`），core 太少（`< TPV_AMIN`）时回退 strong seed；最后只做行/列 span 补洞，不做整 bbox 填充，避免影子、旋转边缘和圆角目标溢出到背景。`rc != TPV_OK` 时整张清零 |
 
 三者层层包含：`mask ⊆ all_blobs_mask ⊆ bin`（§4.6 的测试断言这条不变式）。
+
+> Post-acceptance update: original v2 was a single hard threshold. Real
+> glossy/printed dark objects produced fragmented masks because highlights
+> split one physical object into several CCL components. v2 debug now uses
+> hysteresis thresholding plus border-component rejection as described above;
+> production `tpv_process_frame` remains unchanged.
 
 **CCL label 图的获取**：`tpv_ccl_moments` 目前只输出 blob 列表和 moments，不回填 label 图。v2 方案：
 
@@ -326,11 +332,12 @@ private data class LiveState(
 ```
 
 `onDraw` 里：
-1. 画 yellow ROI 矩形（按照 roi 缩放到 view 空间）
-2. 把 `d.mask` 解码成 `Bitmap(640, 480, ALPHA_8)`（或 ARGB_8888 预乘绿色），缩放盖到 view 上，`alpha = 120`
-3. 画 red center dot（半径 ≈ crop.w × 0.015 → native coords → view coords）
-4. 画 red axis short line（长度 ≈ crop.w × 0.04，比 v1 短）
-5. **不画圆圈**（v1 的圆圈被 mask 填充替代）
+1. 计算和 `PreviewView app:scaleType="fillCenter"` 一致的等比 center-crop transform（不能用 `viewW/nativeW` + `viewH/nativeH` 独立拉伸，否则宽屏平板上 mask 会纵向偏移）
+2. 画 yellow ROI 矩形（按照 roi → native → fillCenter view 空间）
+3. 把 `d.mask` 解码成 `Bitmap(640, 480, ALPHA_8)`（或 ARGB_8888 预乘绿色），用同一个 fillCenter transform 缩放盖到 view 上，`alpha = 120`
+4. 画 red center dot（半径 ≈ crop.w × 0.015 → native coords → view coords）
+5. 画 red axis short line（长度 ≈ crop.w × 0.04，比 v1 短）
+6. **不画圆圈**（v1 的圆圈被 mask 填充替代）
 
 Mask bitmap 生成助手（在 `OverlayPainter` 里新增）：
 

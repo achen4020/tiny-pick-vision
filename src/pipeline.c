@@ -134,6 +134,11 @@ int tpv_process_frame_debug(const uint8_t *y, int w, int h,
  * per-frame label map buffer for mask derivation. All static + #ifdef-
  * guarded; production build sees none of this. */
 static uint16_t g_labels_v2[TPV_WIDTH * TPV_HEIGHT];
+static uint8_t  g_strong_bin_v2[TPV_WIDTH * TPV_HEIGHT / 8];
+static uint8_t  g_display_core_bin_v2[TPV_WIDTH * TPV_HEIGHT / 8];
+static uint8_t  g_seeded_label_v2[TPV_MAX_BLOBS + 1];
+static uint8_t  g_border_label_v2[TPV_MAX_BLOBS + 1];
+static uint8_t  g_group_label_v2[TPV_MAX_BLOBS + 1];
 
 static void threshold_v2(const uint8_t *y, int w, int h,
                           uint8_t threshold, int dark_mode,
@@ -146,6 +151,115 @@ static void threshold_v2(const uint8_t *y, int w, int h,
         if (is_fg) bin_out[i >> 3] |= (uint8_t)(1u << (i & 7));
     }
 }
+
+static uint8_t relaxed_threshold_v2(uint8_t threshold, int dark_mode) {
+    const int delta = 48;
+    int t = dark_mode ? (int)threshold + delta : (int)threshold - delta;
+    if (t < 0) t = 0;
+    if (t > 255) t = 255;
+    return (uint8_t)t;
+}
+
+static uint8_t display_core_threshold_v2(uint8_t threshold, int dark_mode) {
+    const int delta = 32;
+    int t = dark_mode ? (int)threshold - delta : (int)threshold + delta;
+    if (t < 0) t = 0;
+    if (t > 255) t = 255;
+    return (uint8_t)t;
+}
+
+static int bit_is_set_v2(const uint8_t *bits, int idx) {
+    return (bits[idx >> 3] >> (idx & 7)) & 1;
+}
+
+static void set_bit_v2(uint8_t *bits, int idx) {
+    bits[idx >> 3] |= (uint8_t)(1u << (idx & 7));
+}
+
+static int ranges_overlap_v2(int a0, int a1, int b0, int b1) {
+    return a0 <= b1 && b0 <= a1;
+}
+
+static int bboxes_near_v2(const tpv_Blob *a, const tpv_Blob *b) {
+    const int margin_x = 80;
+    const int margin_y = 80;
+    int ax0 = a->bbox_x0 - margin_x, ax1 = a->bbox_x1 + margin_x;
+    int ay0 = a->bbox_y0 - margin_y, ay1 = a->bbox_y1 + margin_y;
+    return ranges_overlap_v2(ax0, ax1, b->bbox_x0, b->bbox_x1) &&
+           ranges_overlap_v2(ay0, ay1, b->bbox_y0, b->bbox_y1);
+}
+
+static void fill_mask_spans_v2(uint8_t *mask, int w, int h,
+                               int x0, int y0, int x1, int y1) {
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= w) x1 = w - 1;
+    if (y1 >= h) y1 = h - 1;
+
+    /* Horizontal span fill: closes holes on rows that already intersect the
+     * object mask. */
+    for (int yy = y0; yy <= y1; yy++) {
+        int first = -1, last = -1;
+        for (int xx = x0; xx <= x1; xx++) {
+            int idx = yy * w + xx;
+            if (bit_is_set_v2(mask, idx)) {
+                if (first < 0) first = xx;
+                last = xx;
+            }
+        }
+        if (first >= 0) {
+            for (int xx = first; xx <= last; xx++) {
+                set_bit_v2(mask, yy * w + xx);
+            }
+        }
+    }
+
+    /* Vertical span fill: closes highlight bands that split the same physical
+     * object into top/bottom pieces. */
+    for (int xx = x0; xx <= x1; xx++) {
+        int first = -1, last = -1;
+        for (int yy = y0; yy <= y1; yy++) {
+            int idx = yy * w + xx;
+            if (bit_is_set_v2(mask, idx)) {
+                if (first < 0) first = yy;
+                last = yy;
+            }
+        }
+        if (first >= 0) {
+            for (int yy = first; yy <= last; yy++) {
+                set_bit_v2(mask, yy * w + xx);
+            }
+        }
+    }
+
+    /* Do not fill the whole bbox. Real phone-like targets are slightly
+     * rotated and have rounded corners; rectangular envelope fill makes the
+     * green overlay spill onto the white background. Row/column spans close
+     * internal highlight gaps while preserving sloped outer edges. */
+}
+
+static void measure_mask_v2(const uint8_t *mask, int w,
+                            int x0, int y0, int x1, int y1,
+                            int32_t *area_out,
+                            int64_t *m10_out,
+                            int64_t *m01_out) {
+    int32_t area = 0;
+    int64_t m10 = 0, m01 = 0;
+    for (int yy = y0; yy <= y1; yy++) {
+        for (int xx = x0; xx <= x1; xx++) {
+            int idx = yy * w + xx;
+            if (bit_is_set_v2(mask, idx)) {
+                area++;
+                m10 += xx;
+                m01 += yy;
+            }
+        }
+    }
+    *area_out = area;
+    *m10_out = m10;
+    *m01_out = m01;
+}
+
 
 static void clip_bin_to_roi(uint8_t *bin, int w, int h,
                              int roi_x, int roi_y, int roi_w, int roi_h) {
@@ -210,26 +324,61 @@ int tpv_process_frame_debug_v2(
     if (roi_x < 0 || roi_y < 0 || roi_w <= 0 || roi_h <= 0 ||
         roi_w > w - roi_x || roi_h > h - roi_y) return TPV_BAD_INPUT;
 
-    /* 1. threshold_v2 with runtime params (NOT tpv_bin_threshold global) */
-    threshold_v2(y, w, h, bin_threshold, dark_object_mode, out->bin);
+    /* 1. Strong seeds from the user-visible threshold. */
+    threshold_v2(y, w, h, bin_threshold, dark_object_mode, g_strong_bin_v2);
+    clip_bin_to_roi(g_strong_bin_v2, w, h, roi_x, roi_y, roi_w, roi_h);
 
-    /* 2. ROI clip - writes out->bin in place */
+    /* 2. Weak candidate mask for glossy/printed dark objects. The final bin
+     * keeps only weak connected components that contain at least one strong
+     * seed. This is hysteresis thresholding: it bridges reflections inside an
+     * object without accepting unrelated weak background regions. */
+    threshold_v2(y, w, h, relaxed_threshold_v2(bin_threshold, dark_object_mode),
+                 dark_object_mode, out->bin);
     clip_bin_to_roi(out->bin, w, h, roi_x, roi_y, roi_w, roi_h);
 
     /* 3. CCL with label map */
     static tpv_Blob blobs[TPV_MAX_BLOBS];
     int n = tpv_ccl_moments(out->bin, w, h, blobs, TPV_MAX_BLOBS, g_labels_v2);
     if (n < 0) {
-        /* Non-OK contract: BAD_INPUT / SCENE_ERROR / EMPTY expose no stale
-         * diagnostic masks. Clear bin too, even though thresholding already ran. */
-        memset(out, 0, sizeof *out);
-        return TPV_SCENE_ERROR;
+        /* If the relaxed weak threshold admits too many unrelated tiny
+         * components, preserve the old strong-threshold behavior rather than
+         * turning a previously detectable frame into SCENE_ERROR. */
+        memcpy(out->bin, g_strong_bin_v2, sizeof out->bin);
+        n = tpv_ccl_moments(out->bin, w, h, blobs, TPV_MAX_BLOBS, g_labels_v2);
+        if (n < 0) {
+            /* Non-OK contract: BAD_INPUT / SCENE_ERROR / EMPTY expose no stale
+             * diagnostic masks. Clear bin too, even though thresholding ran. */
+            memset(out, 0, sizeof *out);
+            return TPV_SCENE_ERROR;
+        }
     }
 
-    /* 4. Fill all_blobs_mask: every non-zero label = 1 */
+    memset(g_seeded_label_v2, 0, sizeof g_seeded_label_v2);
+    memset(g_border_label_v2, 0, sizeof g_border_label_v2);
     const int npix = w * h;
+    for (int yy = 0; yy < h; yy++) {
+        for (int xx = 0; xx < w; xx++) {
+            int i = yy * w + xx;
+            uint16_t label = g_labels_v2[i];
+            if (label == 0) continue;
+            if (bit_is_set_v2(g_strong_bin_v2, i)) {
+                g_seeded_label_v2[label] = 1;
+            }
+            if (xx == 0 || yy == 0 || xx == w - 1 || yy == h - 1) {
+                g_border_label_v2[label] = 1;
+            }
+        }
+    }
+
+    /* 4. Rewrite out->bin to the hysteresis-filtered weak components, and
+     * fill all_blobs_mask from the same kept components. Frame-border
+     * components are usually table/background, not the centered object under
+     * test, so drop them from the bench debug overlay. */
+    memset(out->bin, 0, sizeof out->bin);
     for (int i = 0; i < npix; i++) {
-        if (g_labels_v2[i] != 0) {
+        uint16_t label = g_labels_v2[i];
+        if (label != 0 && g_seeded_label_v2[label] && !g_border_label_v2[label]) {
+            out->bin[i >> 3] |= (uint8_t)(1u << (i & 7));
             out->all_blobs_mask[i >> 3] |= (uint8_t)(1u << (i & 7));
         }
     }
@@ -243,6 +392,7 @@ int tpv_process_frame_debug_v2(
     static tpv_Features  feat_pool[TPV_MAX_BLOBS];
     static int           blob_idx_pool[TPV_MAX_BLOBS];
     int pn = 0;
+    int32_t area_pool[TPV_MAX_BLOBS];
     /* NOTE: the per-blob filter/classify/pose/argmax loop below duplicates
      * the same logic in tpv_process_frame (src/pipeline.c:~22-58). Any
      * change to the production selection policy (AMIN/AMAX bounds, argmax
@@ -251,6 +401,8 @@ int tpv_process_frame_debug_v2(
      * function re-thresholds from scratch, so extracting a true common
      * helper would require larger restructuring. */
     for (int i = 0; i < n; i++) {
+        if (!g_seeded_label_v2[i + 1]) continue;
+        if (g_border_label_v2[i + 1]) continue;
         if (blobs[i].m00 < TPV_AMIN || blobs[i].m00 > TPV_AMAX) continue;
         tpv_Features f;
         tpv_shape_features(&blobs[i], &f);
@@ -263,6 +415,7 @@ int tpv_process_frame_debug_v2(
         d1_pool[pn] = d1sq;
         feat_pool[pn] = f;
         blob_idx_pool[pn] = i;
+        area_pool[pn] = blobs[i].m00;
         pn++;
     }
     if (pn == 0) {
@@ -272,7 +425,8 @@ int tpv_process_frame_debug_v2(
 
     /* argmax over ACCEPTED, else min d1 over REJECTED/AMBIGUOUS */
     int best_acc = -1, best_conf = -1;
-    int best_reject = -1; int32_t best_d1 = INT32_MAX;
+    int best_reject = -1; int32_t best_reject_area = -1;
+    int32_t best_d1 = INT32_MAX;
     for (int i = 0; i < pn; i++) {
         if (pool[i].class_id <= 4) {
             if (pool[i].confidence_q8 > best_conf) {
@@ -280,7 +434,9 @@ int tpv_process_frame_debug_v2(
                 best_acc = i;
             }
         } else {
-            if (d1_pool[i] < best_d1) {
+            if (area_pool[i] > best_reject_area ||
+                (area_pool[i] == best_reject_area && d1_pool[i] < best_d1)) {
+                best_reject_area = area_pool[i];
                 best_d1 = d1_pool[i];
                 best_reject = i;
             }
@@ -298,24 +454,92 @@ int tpv_process_frame_debug_v2(
     /* labels_out contains compact labels aligned with blobs_out[rl - 1]. */
     uint16_t winner_label = (uint16_t)(winner_blob + 1);
 
+    memset(g_group_label_v2, 0, sizeof g_group_label_v2);
+    g_group_label_v2[winner_label] = 1;
+    int32_t group_area = 0;
+    int64_t group_m10 = 0, group_m01 = 0;
+    int group_x0 = TPV_WIDTH, group_y0 = TPV_HEIGHT;
+    int group_x1 = -1, group_y1 = -1;
+    for (int i = 0; i < n; i++) {
+        uint16_t label = (uint16_t)(i + 1);
+        if (!g_seeded_label_v2[label]) continue;
+        if (g_border_label_v2[label]) continue;
+        if (blobs[i].m00 < TPV_AMIN) continue;
+        if (!bboxes_near_v2(&blobs[winner_blob], &blobs[i])) continue;
+        g_group_label_v2[label] = 1;
+        group_area += blobs[i].m00;
+        group_m10 += blobs[i].m10;
+        group_m01 += blobs[i].m01;
+        if (blobs[i].bbox_x0 < group_x0) group_x0 = blobs[i].bbox_x0;
+        if (blobs[i].bbox_y0 < group_y0) group_y0 = blobs[i].bbox_y0;
+        if (blobs[i].bbox_x1 > group_x1) group_x1 = blobs[i].bbox_x1;
+        if (blobs[i].bbox_y1 > group_y1) group_y1 = blobs[i].bbox_y1;
+    }
+    if (group_area <= 0) {
+        g_group_label_v2[winner_label] = 1;
+        group_area = blobs[winner_blob].m00;
+        group_m10 = blobs[winner_blob].m10;
+        group_m01 = blobs[winner_blob].m01;
+        group_x0 = blobs[winner_blob].bbox_x0;
+        group_y0 = blobs[winner_blob].bbox_y0;
+        group_x1 = blobs[winner_blob].bbox_x1;
+        group_y1 = blobs[winner_blob].bbox_y1;
+    }
+
     out->det = pool[winner_pn];
+    if (group_area > 0) {
+        out->det.x = (int16_t)(group_m10 / group_area);
+        out->det.y = (int16_t)(group_m01 / group_area);
+    }
     out->features = feat_pool[winner_pn];
     for (int c = 0; c < TPV_N_CLASSES; c++) {
         int64_t d = tpv_mahal_sq_q16(&out->features, &tpv_templates[c]);
         out->distances_sq[c] = (int32_t)(d > INT32_MAX ? INT32_MAX : d);
     }
 
-    out->bbox_x0 = blobs[winner_blob].bbox_x0;
-    out->bbox_y0 = blobs[winner_blob].bbox_y0;
-    out->bbox_x1 = blobs[winner_blob].bbox_x1;
-    out->bbox_y1 = blobs[winner_blob].bbox_y1;
-    out->area_px = (int32_t)blobs[winner_blob].m00;
+    out->bbox_x0 = (int16_t)group_x0;
+    out->bbox_y0 = (int16_t)group_y0;
+    out->bbox_x1 = (int16_t)group_x1;
+    out->bbox_y1 = (int16_t)group_y1;
+    out->area_px = group_area;
 
-    /* 6. Fill winning mask: pixels with label == winner_label */
+    /* 6. Fill final object mask: winner anchor plus nearby non-border
+     * components that likely belong to the same physical object. */
+    threshold_v2(y, w, h, display_core_threshold_v2(bin_threshold, dark_object_mode),
+                 dark_object_mode, g_display_core_bin_v2);
+    clip_bin_to_roi(g_display_core_bin_v2, w, h, roi_x, roi_y, roi_w, roi_h);
+    int display_core_px = 0;
     for (int i = 0; i < npix; i++) {
-        if (g_labels_v2[i] == winner_label) {
+        uint16_t label = g_labels_v2[i];
+        if (label != 0 && g_group_label_v2[label] &&
+            bit_is_set_v2(g_display_core_bin_v2, i)) {
             out->mask[i >> 3] |= (uint8_t)(1u << (i & 7));
+            display_core_px++;
         }
+    }
+    if (display_core_px < TPV_AMIN) {
+        memset(out->mask, 0, sizeof out->mask);
+        for (int i = 0; i < npix; i++) {
+            uint16_t label = g_labels_v2[i];
+            if (label != 0 && g_group_label_v2[label] &&
+                bit_is_set_v2(g_strong_bin_v2, i)) {
+                out->mask[i >> 3] |= (uint8_t)(1u << (i & 7));
+            }
+        }
+    }
+
+    fill_mask_spans_v2(out->mask, w, h, group_x0, group_y0, group_x1, group_y1);
+    for (int i = 0; i < npix; i++) {
+        if (bit_is_set_v2(out->mask, i)) {
+            out->bin[i >> 3] |= (uint8_t)(1u << (i & 7));
+            out->all_blobs_mask[i >> 3] |= (uint8_t)(1u << (i & 7));
+        }
+    }
+    measure_mask_v2(out->mask, w, group_x0, group_y0, group_x1, group_y1,
+                    &out->area_px, &group_m10, &group_m01);
+    if (out->area_px > 0) {
+        out->det.x = (int16_t)(group_m10 / out->area_px);
+        out->det.y = (int16_t)(group_m01 / out->area_px);
     }
 
     /* 7. grid_8x8 from mask */

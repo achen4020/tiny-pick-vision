@@ -49,7 +49,8 @@
         app:layout_constraintTop_toBottomOf="@id/status_line"
         app:layout_constraintBottom_toTopOf="@id/diag"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
+        app:layout_constraintEnd_toEndOf="parent"
+        app:scaleType="fillCenter" />
 
     <com.tpv.bench.OverlayView
         android:id="@+id/overlay"

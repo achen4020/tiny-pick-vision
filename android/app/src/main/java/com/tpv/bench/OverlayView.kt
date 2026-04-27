@@ -111,15 +111,19 @@ class OverlayView @JvmOverloads constructor(
         val f = live.get() ?: return
         if (width == 0 || height == 0) return    // pre-layout guard
         val vw = width.toFloat() ; val vh = height.toFloat()
-        val sx = vw / f.nativeW ; val sy = vh / f.nativeH
+        val viewTransform = OverlayPainter.previewFillCenterTransform(
+            width, height, f.nativeW, f.nativeH,
+        )
 
         // ---- 1. Yellow ROI rectangle (drawn every frame, regardless of status) ----
         // ROI is in 640×480 coords; map both corners through crop → native → view.
         val (roiNx0, roiNy0) = OverlayPainter.mapCoord(f.roi.x, f.roi.y, f.crop)
         val (roiNx1, roiNy1) = OverlayPainter.mapCoord(
             f.roi.x + f.roi.w, f.roi.y + f.roi.h, f.crop)
+        val (roiVx0, roiVy0) = OverlayPainter.mapNativeToView(roiNx0, roiNy0, viewTransform)
+        val (roiVx1, roiVy1) = OverlayPainter.mapNativeToView(roiNx1, roiNy1, viewTransform)
         canvas.drawRect(
-            roiNx0 * sx, roiNy0 * sy, roiNx1 * sx, roiNy1 * sy, roiPaint
+            roiVx0, roiVy0, roiVx1, roiVy1, roiPaint
         )
 
         // ---- 2. Green mask fill + red center dot + short axis line ----
@@ -134,21 +138,21 @@ class OverlayView @JvmOverloads constructor(
             maskBitmap.setPixels(maskPixels, 0, 640, 0, 0, 640, 480)
             // Destination: map the 640×480 mask into the camera→target crop
             // rect on the native frame, then to view coords.
-            val dstLeft   = f.crop.x * sx
-            val dstTop    = f.crop.y * sy
-            val dstRight  = (f.crop.x + f.crop.w) * sx
-            val dstBottom = (f.crop.y + f.crop.h) * sy
+            val dstLeft   = viewTransform.offsetX + f.crop.x * viewTransform.scale
+            val dstTop    = viewTransform.offsetY + f.crop.y * viewTransform.scale
+            val dstRight  = viewTransform.offsetX + (f.crop.x + f.crop.w) * viewTransform.scale
+            val dstBottom = viewTransform.offsetY + (f.crop.y + f.crop.h) * viewTransform.scale
             val dstRect = RectF(dstLeft, dstTop, dstRight, dstBottom)
             canvas.drawBitmap(maskBitmap, null, dstRect, null)
 
             // Red center dot
             val (nx, ny) = OverlayPainter.mapCoord(f.d.det.x, f.d.det.y, f.crop)
-            val cx = nx * sx ; val cy = ny * sy
-            val dotR = (f.crop.w * 0.015f * sx).coerceAtLeast(4f)
+            val (cx, cy) = OverlayPainter.mapNativeToView(nx, ny, viewTransform)
+            val dotR = (f.crop.w * 0.015f * viewTransform.scale).coerceAtLeast(4f)
             canvas.drawCircle(cx, cy, dotR, centerPaint)
 
             // Short axis line
-            val axisLen = (f.crop.w * 0.04f * sx).coerceAtLeast(8f)
+            val axisLen = (f.crop.w * 0.04f * viewTransform.scale).coerceAtLeast(8f)
             val thetaRad = Math.toRadians(f.d.det.thetaX10 / 10.0)
             canvas.drawLine(
                 cx, cy,

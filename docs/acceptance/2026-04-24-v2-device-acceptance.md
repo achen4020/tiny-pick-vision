@@ -31,7 +31,17 @@ Tested binThreshold values:
 - 120: best stability/coverage tradeoff for white-paper-bg-dark-obj scene
 - 180: too permissive — paper shadows enter foreground, true blob drowned in noise
 
-Future work (out of v2 scope): morphological close (dilate→erode) on `bin` would merge highlight-induced holes inside the object. Would add cost and bin/winner divergence; defer until calibration-phase data shows it's needed.
+Post-acceptance fix: the debug v2 path now applies hysteresis thresholding
+(strong UI threshold seed + ±48 relaxed weak connected expansion) before CCL.
+It also drops frame-border components and chooses the largest valid rejected
+component under stub model data, directly targeting both glossy-highlight
+fragmentation and edge-background winner selection. The final mask groups
+nearby non-border components around the selected anchor, so highlight-split
+halves of one object render together. A follow-up adjustment removed whole-bbox
+fill and keeps only row/column span filling, reducing background spill around
+rotated phone edges. The mouse-shadow follow-up uses a stricter display core
+before span filling, so weak/medium cast shadows are less likely to be painted
+while the production v1 `tpv_process_frame` path remains unchanged.
 
 ### Runtime parameters captured
 v2 run `run_2026-04-27T01:17:08Z` ran with: `bin_threshold=120, dark_object_mode=true, roi=(0,0,640,480)`, n_classes=5 (stub). 631 total frames, 10 skipped, 1 committed event. All five v2 meta keys (`ui_version, tpv.bin_threshold, tpv.dark_object_mode, tpv.roi.{x,y,w,h}`) written and round-trip through replay.
