@@ -77,7 +77,7 @@ build/test_debug_api_v2: tests/test_debug_api_v2.c tests/testlib.c $(SRCS) tests
 # is absent, make stops with "No rule to make target" — the correct signal to
 # run the calibration tool first.
 build/replay: tools/replay.c $(SRCS) src/model_data.c | build
-	$(CC_HOST) $(CFLAGS_HOST) -o $@ $^ -lm
+	$(CC_HOST) $(CFLAGS_HOST) -DTPV_DEBUG_FEATURES -o $@ $^ -lm
 
 check-layout: tests/check_layout.c | build
 	$(CC_HOST) $(CFLAGS_HOST) -c $< -o build/check_layout.o
