@@ -36,22 +36,9 @@ typedef struct {
 
 /* Best-effort field lookup: finds the first occurrence of "key" : <value>
  * and parses. Not robust against escaped strings, but our meta.json is
- * produced by JSONObject.toString(2) with predictable formatting. */
-static int meta_find_int(const char *json, const char *key, int *out) {
-    char pat[128];
-    snprintf(pat, sizeof pat, "\"%s\"", key);
-    const char *p = strstr(json, pat);
-    if (!p) return 0;
-    p = strchr(p + strlen(pat), ':');
-    if (!p) return 0;
-    p++;
-    while (*p && (*p == ' ' || *p == '\n' || *p == '\t')) p++;
-    if (*p == 't') { *out = 1; return 1; }  /* true */
-    if (*p == 'f') { *out = 0; return 1; }  /* false */
-    *out = atoi(p);
-    return 1;
-}
-
+ * produced by JSONObject.toString(2) with predictable formatting.
+ * Used only for ui_version (top-level string); int variant lives below
+ * as meta_find_int_in (scoped). */
 static int meta_find_string(const char *json, const char *key,
                              char *out, size_t out_size) {
     char pat[128];
@@ -61,13 +48,59 @@ static int meta_find_string(const char *json, const char *key,
     p = strchr(p + strlen(pat), ':');
     if (!p) return 0;
     p++;
-    while (*p && (*p == ' ' || *p == '\n' || *p == '\t')) p++;
+    while (*p && (*p == ' ' || *p == '\n' || *p == '\t' || *p == '\r')) p++;
     if (*p != '"') return 0;
     p++;
     size_t n = 0;
     while (*p && *p != '"' && n + 1 < out_size) out[n++] = *p++;
     out[n] = '\0';
     return 1;
+}
+
+/* Find the substring containing the JSON object that's the value of "parent_key".
+ * Returns pointer to the opening '{' on success, NULL otherwise. Does NOT
+ * handle nested objects-with-same-key-name; sufficient for our flat meta.json. */
+static const char *meta_find_object(const char *json, const char *parent_key) {
+    char pat[128];
+    snprintf(pat, sizeof pat, "\"%s\"", parent_key);
+    const char *p = strstr(json, pat);
+    if (!p) return NULL;
+    p = strchr(p + strlen(pat), ':');
+    if (!p) return NULL;
+    p++;
+    while (*p && (*p == ' ' || *p == '\n' || *p == '\t' || *p == '\r')) p++;
+    if (*p != '{') return NULL;
+    return p;
+}
+
+/* Like meta_find_int but only searches inside the parent's {...} block.
+ * `scope_start` points at the opening brace; we walk forward counting depth
+ * until depth returns to 0 — that's our scope end. */
+static int meta_find_int_in(const char *scope_start, const char *key, int *out) {
+    if (!scope_start) return 0;
+    /* find the matching closing brace */
+    int depth = 0;
+    const char *end = scope_start;
+    do {
+        if (*end == '{') depth++;
+        else if (*end == '}') depth--;
+        end++;
+    } while (*end && depth > 0);
+    /* search "\"key\"" only within [scope_start, end) */
+    char pat[128];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = scope_start;
+    while ((p = strstr(p, pat)) != NULL && p < end) {
+        const char *colon = strchr(p + strlen(pat), ':');
+        if (!colon || colon >= end) { p++; continue; }
+        colon++;
+        while (*colon && (*colon == ' ' || *colon == '\n' || *colon == '\t' || *colon == '\r')) colon++;
+        if (*colon == 't') { *out = 1; return 1; }
+        if (*colon == 'f') { *out = 0; return 1; }
+        *out = atoi(colon);
+        return 1;
+    }
+    return 0;
 }
 
 static int read_meta(const char *run_dir, ReplayMeta *m) {
@@ -85,6 +118,8 @@ static int read_meta(const char *run_dir, ReplayMeta *m) {
     size_t n = fread(buf, 1, sizeof buf - 1, f);
     fclose(f);
     buf[n] = '\0';
+    if (n == sizeof buf - 1)
+        fprintf(stderr, "replay: meta.json may be truncated at %zu bytes\n", n);
 
     char ver[32] = {0};
     if (meta_find_string(buf, "ui_version", ver, sizeof ver) &&
@@ -92,15 +127,16 @@ static int read_meta(const char *run_dir, ReplayMeta *m) {
 
     int tmp;
     if (m->is_v2) {
-        if (meta_find_int(buf, "bin_threshold", &tmp)) m->bin_threshold = (uint8_t)tmp;
-        if (meta_find_int(buf, "dark_object_mode", &tmp)) m->dark_object_mode = tmp;
-        /* meta.json key order is device → tpv → trigger → camera; no "x/y/w/h"
-         * appears in the device block, so the first match for these short
-         * keys lands on tpv.roi.{x,y,w,h}. See RunRecorder.kt:metaToJson. */
-        if (meta_find_int(buf, "x", &tmp)) m->roi_x = tmp;
-        if (meta_find_int(buf, "y", &tmp)) m->roi_y = tmp;
-        if (meta_find_int(buf, "w", &tmp)) m->roi_w = tmp;
-        if (meta_find_int(buf, "h", &tmp)) m->roi_h = tmp;
+        const char *tpv_obj = meta_find_object(buf, "tpv");
+        if (meta_find_int_in(tpv_obj, "bin_threshold", &tmp))
+            m->bin_threshold = (uint8_t)tmp;
+        if (meta_find_int_in(tpv_obj, "dark_object_mode", &tmp))
+            m->dark_object_mode = tmp;
+        const char *roi_obj = tpv_obj ? meta_find_object(tpv_obj, "roi") : NULL;
+        if (meta_find_int_in(roi_obj, "x", &tmp)) m->roi_x = tmp;
+        if (meta_find_int_in(roi_obj, "y", &tmp)) m->roi_y = tmp;
+        if (meta_find_int_in(roi_obj, "w", &tmp)) m->roi_w = tmp;
+        if (meta_find_int_in(roi_obj, "h", &tmp)) m->roi_h = tmp;
     }
     return 1;
 }
@@ -113,7 +149,8 @@ int main(int argc, char **argv) {
     const char *run_dir = NULL;
     int force_v1 = 0, force_v2 = 0;
     int override_thr = -1, override_dark = -1;
-    int override_roi_x = -1, roi_y = 0, roi_w = 0, roi_h = 0;
+    int roi_overridden = 0;
+    int roi_x_override = 0, roi_y_override = 0, roi_w_override = 0, roi_h_override = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--v1")) force_v1 = 1;
@@ -126,15 +163,32 @@ int main(int argc, char **argv) {
             }
         } else if (!strcmp(argv[i], "--dark-object-mode") && i+1 < argc) {
             override_dark = atoi(argv[++i]);
+            if (override_dark != 0 && override_dark != 1) {
+                fprintf(stderr, "--dark-object-mode must be 0 or 1\n");
+                return 2;
+            }
         } else if (!strcmp(argv[i], "--roi") && i+1 < argc) {
-            if (!parse_roi(argv[++i], &override_roi_x, &roi_y, &roi_w, &roi_h)) {
+            if (!parse_roi(argv[++i], &roi_x_override, &roi_y_override,
+                                      &roi_w_override, &roi_h_override)) {
                 fprintf(stderr, "--roi needs x,y,w,h\n"); return 2;
             }
+            if (roi_x_override < 0 || roi_y_override < 0 ||
+                roi_w_override <= 0 || roi_h_override <= 0 ||
+                roi_x_override + roi_w_override > 640 ||
+                roi_y_override + roi_h_override > 480) {
+                fprintf(stderr, "--roi out of frame: x>=0, y>=0, w>0, h>0, x+w<=640, y+h<=480\n");
+                return 2;
+            }
+            roi_overridden = 1;
         } else if (argv[i][0] != '-') {
             run_dir = argv[i];
         } else {
             fprintf(stderr, "unknown arg: %s\n", argv[i]); return 2;
         }
+    }
+    if (force_v1 && force_v2) {
+        fprintf(stderr, "--v1 and --v2 are mutually exclusive\n");
+        return 2;
     }
     if (!run_dir) {
         fprintf(stderr, "usage: replay [--v1|--v2] [--bin-threshold N] [--dark-object-mode 0|1] [--roi x,y,w,h] <run_dir_or_frames_dir>\n");
@@ -142,14 +196,18 @@ int main(int argc, char **argv) {
     }
 
     ReplayMeta meta;
-    read_meta(run_dir, &meta);
+    int meta_found = read_meta(run_dir, &meta);
+    if (force_v2 && !meta_found) {
+        fprintf(stderr, "replay: --v2 requested but meta.json not found in %s\n", run_dir);
+        return 2;
+    }
     if (force_v1) meta.is_v2 = 0;
     if (force_v2) meta.is_v2 = 1;
     if (override_thr >= 0)  meta.bin_threshold = (uint8_t)override_thr;
     if (override_dark >= 0) meta.dark_object_mode = override_dark;
-    if (override_roi_x >= 0) {
-        meta.roi_x = override_roi_x; meta.roi_y = roi_y;
-        meta.roi_w = roi_w; meta.roi_h = roi_h;
+    if (roi_overridden) {
+        meta.roi_x = roi_x_override; meta.roi_y = roi_y_override;
+        meta.roi_w = roi_w_override; meta.roi_h = roi_h_override;
     }
 
     DIR *dir = opendir(run_dir);

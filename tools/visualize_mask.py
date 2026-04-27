@@ -8,8 +8,6 @@ Default output: same path with .mask -> .png
 
 No external dependencies beyond Pillow (standard install).
 """
-import os
-import struct
 import sys
 from pathlib import Path
 
@@ -51,7 +49,7 @@ def main():
     pixels = decode_mask(raw)
     img = Image.frombytes("L", (WIDTH, HEIGHT), pixels)
     img.save(out)
-    n_fg = sum(1 for b in pixels if b == 255)
+    n_fg = pixels.count(255)
     print(f"{inp} -> {out}  ({n_fg} foreground px, {n_fg * 100.0 / (WIDTH * HEIGHT):.2f}%)")
 
 if __name__ == "__main__":
