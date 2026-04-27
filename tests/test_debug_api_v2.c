@@ -4,6 +4,7 @@
 #include <string.h>
 #include "tpv.h"
 #include "tpv_internal.h"
+#include "tpv_vision.h"
 #include "testlib.h"
 
 static uint8_t frame[TPV_WIDTH * TPV_HEIGHT];
@@ -272,6 +273,47 @@ TEST(t_v2_relaxed_threshold_does_not_absorb_cast_shadow) {
     CHECK_EQ_I(popcount_bits(v2.mask, sizeof v2.mask), v2.area_px);
 }
 
+TEST(t_vision_api_uses_runtime_v2_config) {
+    paint_dark_square_on_bright_bg(320, 240, 20);
+
+    tpv_vision_config cfg;
+    tpv_vision_default_config(&cfg);
+    cfg.bin_threshold = 128;
+    cfg.dark_object_mode = 1;
+    cfg.roi_x = 250;
+    cfg.roi_y = 170;
+    cfg.roi_w = 140;
+    cfg.roi_h = 140;
+
+    size_t bytes = 0;
+    CHECK_EQ_I(tpv_vision_context_size(&cfg, &bytes), TPV_OK);
+    uint8_t storage[4096];
+    tpv_vision_context *ctx = 0;
+    CHECK_EQ_I(tpv_vision_init(storage, sizeof storage, &cfg, &ctx), TPV_OK);
+
+    tpv_vision_frame vf;
+    memset(&vf, 0, sizeof vf);
+    vf.data = frame;
+    vf.width = TPV_WIDTH;
+    vf.height = TPV_HEIGHT;
+    vf.stride = TPV_WIDTH;
+    vf.format = TPV_PIXEL_Y8_640X480;
+
+    tpv_vision_detection detections[1];
+    tpv_vision_result result;
+    memset(&result, 0, sizeof result);
+    result.detections = detections;
+    result.detection_capacity = 1;
+
+    CHECK_EQ_I(tpv_vision_process(ctx, &vf, &result), TPV_OK);
+    CHECK_EQ_I(result.detection_count, 1);
+    CHECK_EQ_I(detections[0].track_id, 1);
+    CHECK(detections[0].flags & TPV_DETECTION_HAS_BBOX);
+    CHECK(detections[0].bbox_w >= 35 && detections[0].bbox_w <= 45);
+    CHECK(detections[0].bbox_h >= 35 && detections[0].bbox_h <= 45);
+    CHECK(detections[0].flags & TPV_DETECTION_TRACK_TENTATIVE);
+}
+
 int main(void) {
     RUN(t_v2_bright_square_matches_v1_decision);
     RUN(t_v2_dark_object_mode_inverts_threshold);
@@ -284,5 +326,6 @@ int main(void) {
     RUN(t_v2_groups_split_center_object_components);
     RUN(t_v2_span_fill_preserves_sloped_edges);
     RUN(t_v2_relaxed_threshold_does_not_absorb_cast_shadow);
+    RUN(t_vision_api_uses_runtime_v2_config);
     FINISH();
 }

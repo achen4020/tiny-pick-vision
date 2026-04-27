@@ -70,6 +70,37 @@ data class TpvDetectionDebugV2(
     }
 }
 
+data class TpvVisionDetection(
+    val engineId: Int,
+    val detectionId: Long,
+    val trackId: Long,
+    val flags: Int,
+    val classId: Int,
+    val confidenceQ8: Int,
+    val status: Int,
+    val centerX: Int,
+    val centerY: Int,
+    val bbox: TpvBbox,
+    val thetaX10: Int,
+    val trackAgeFrames: Int,
+    val trackHits: Int,
+    val trackMisses: Int,
+)
+
+data class TpvVisionResult(
+    val status: Int,
+    val primaryEventEngine: Int,
+    val detections: Array<TpvVisionDetection>,
+) {
+    override fun equals(other: Any?) = other is TpvVisionResult &&
+        status == other.status &&
+        primaryEventEngine == other.primaryEventEngine &&
+        detections.contentEquals(other.detections)
+
+    override fun hashCode(): Int =
+        (status * 31 + primaryEventEngine) * 31 + detections.contentHashCode()
+}
+
 object TpvNative {
     init {
         System.loadLibrary("tpv")
@@ -113,6 +144,32 @@ object TpvNative {
         roiX: Int, roiY: Int, roiW: Int, roiH: Int,
         outTimingNs: LongArray,
     ): TpvDetectionDebugV2
+
+    external fun visionCreateV3(
+        enabledEngines: Int,
+        primaryEventEngine: Int,
+        binThreshold: Int,
+        darkObjectMode: Boolean,
+        roiX: Int, roiY: Int, roiW: Int, roiH: Int,
+        trackerMinHits: Int,
+        trackerMaxAge: Int,
+        trackerIouThreshold: Float,
+        trackerCenterDistancePx: Float,
+        faceMinScore: Float,
+        objectMinScore: Float,
+    ): Long
+
+    external fun visionResetV3(handle: Long)
+
+    external fun visionCloseV3(handle: Long)
+
+    external fun processVisionFrameV3(
+        handle: Long,
+        y: ByteArray,
+        width: Int,
+        height: Int,
+        outTimingNs: LongArray,
+    ): TpvVisionResult
 
     /** Reads `extern const uint8_t tpv_bin_threshold` from libtpv.so. */
     external fun binThreshold(): Int

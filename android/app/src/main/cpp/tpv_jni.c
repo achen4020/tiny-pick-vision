@@ -1,10 +1,12 @@
 #include <jni.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <android/log.h>
 #include "tpv.h"
 #include "tpv_internal.h"
+#include "tpv_vision.h"
 
 #define LOG_TAG "tpv_jni"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -116,6 +118,60 @@ static int init_cache_v2(JNIEnv *env) {
 /* v2 uses its own static output buffer so the 115 KB struct is not alloc'd
  * on the stack. Single-threaded camera callback makes this safe. */
 static tpv_DetectionDebugV2 s_v2_out;
+
+typedef struct {
+    void *mem;
+    size_t bytes;
+    tpv_vision_context *ctx;
+} VisionHandle;
+
+typedef struct {
+    jclass bbox_cls, vision_det_cls, vision_result_cls;
+    jmethodID bbox_ctor, vision_det_ctor, vision_result_ctor;
+    int initialized;
+} JniCacheV3;
+static JniCacheV3 s_cache_v3;
+
+static int init_cache_v3(JNIEnv *env) {
+    if (s_cache_v3.initialized) return 0;
+
+    jclass bbox = (*env)->FindClass(env, "com/tpv/bench/TpvBbox");
+    jclass det = (*env)->FindClass(env, "com/tpv/bench/TpvVisionDetection");
+    jclass result = (*env)->FindClass(env, "com/tpv/bench/TpvVisionResult");
+    if (!bbox || !det || !result) {
+        LOGE("FindClass v3 failed");
+        return -1;
+    }
+
+    s_cache_v3.bbox_cls = (*env)->NewGlobalRef(env, bbox);
+    s_cache_v3.vision_det_cls = (*env)->NewGlobalRef(env, det);
+    s_cache_v3.vision_result_cls = (*env)->NewGlobalRef(env, result);
+
+    s_cache_v3.bbox_ctor = (*env)->GetMethodID(env, s_cache_v3.bbox_cls, "<init>",
+        "(IIII)V");
+    s_cache_v3.vision_det_ctor = (*env)->GetMethodID(env, s_cache_v3.vision_det_cls,
+        "<init>", "(IJJIIIIIILcom/tpv/bench/TpvBbox;IIII)V");
+    s_cache_v3.vision_result_ctor = (*env)->GetMethodID(env,
+        s_cache_v3.vision_result_cls, "<init>",
+        "(II[Lcom/tpv/bench/TpvVisionDetection;)V");
+
+    if (!s_cache_v3.bbox_ctor || !s_cache_v3.vision_det_ctor ||
+        !s_cache_v3.vision_result_ctor) {
+        LOGE("GetMethodID v3 failed");
+        if (s_cache_v3.bbox_cls) (*env)->DeleteGlobalRef(env, s_cache_v3.bbox_cls);
+        if (s_cache_v3.vision_det_cls) (*env)->DeleteGlobalRef(env, s_cache_v3.vision_det_cls);
+        if (s_cache_v3.vision_result_cls) (*env)->DeleteGlobalRef(env, s_cache_v3.vision_result_cls);
+        memset(&s_cache_v3, 0, sizeof s_cache_v3);
+        return -1;
+    }
+
+    s_cache_v3.initialized = 1;
+    return 0;
+}
+
+static VisionHandle *vision_handle_from_jlong(jlong handle) {
+    return (VisionHandle *)(intptr_t)handle;
+}
 
 static jlong monotonic_ns(void) {
     struct timespec ts;
@@ -300,6 +356,182 @@ Java_com_tpv_bench_TpvNative_processFrameDebugV2(
         det_obj, feat_obj, dsq,
         bbox_obj, (jint)s_v2_out.area_px, (jint)s_v2_out.grid_8x8,
         bin_arr, all_arr, mask_arr);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_tpv_bench_TpvNative_visionCreateV3(
+    JNIEnv *env, jobject thiz,
+    jint enabled_engines,
+    jint primary_event_engine,
+    jint bin_threshold,
+    jboolean dark_object_mode,
+    jint roi_x, jint roi_y, jint roi_w, jint roi_h,
+    jint tracker_min_hits,
+    jint tracker_max_age,
+    jfloat tracker_iou_threshold,
+    jfloat tracker_center_distance_px,
+    jfloat face_min_score,
+    jfloat object_min_score)
+{
+    (void)thiz;
+
+    tpv_vision_config cfg;
+    tpv_vision_default_config(&cfg);
+    cfg.enabled_engines = (uint32_t)enabled_engines;
+    cfg.primary_event_engine = (uint32_t)primary_event_engine;
+    cfg.bin_threshold = (uint8_t)(bin_threshold & 0xFF);
+    cfg.dark_object_mode = dark_object_mode ? 1u : 0u;
+    cfg.roi_x = (int16_t)roi_x;
+    cfg.roi_y = (int16_t)roi_y;
+    cfg.roi_w = (int16_t)roi_w;
+    cfg.roi_h = (int16_t)roi_h;
+    cfg.tracker_min_hits = tracker_min_hits;
+    cfg.tracker_max_age = tracker_max_age;
+    cfg.tracker_iou_threshold = tracker_iou_threshold;
+    cfg.tracker_center_distance_px = tracker_center_distance_px;
+    cfg.face_min_score = face_min_score;
+    cfg.object_min_score = object_min_score;
+
+    size_t bytes = 0;
+    int rc = tpv_vision_context_size(&cfg, &bytes);
+    if (rc != TPV_OK || bytes == 0) {
+        throw_illegal_state(env, "tpv_jni: tpv_vision_context_size failed");
+        return 0;
+    }
+
+    VisionHandle *handle = (VisionHandle *)calloc(1, sizeof *handle);
+    if (!handle) {
+        throw_illegal_state(env, "tpv_jni: VisionHandle allocation failed");
+        return 0;
+    }
+    handle->mem = calloc(1, bytes);
+    if (!handle->mem) {
+        free(handle);
+        throw_illegal_state(env, "tpv_jni: tpv_vision_context allocation failed");
+        return 0;
+    }
+    handle->bytes = bytes;
+    rc = tpv_vision_init(handle->mem, handle->bytes, &cfg, &handle->ctx);
+    if (rc != TPV_OK || !handle->ctx) {
+        free(handle->mem);
+        free(handle);
+        throw_illegal_state(env, "tpv_jni: tpv_vision_init failed");
+        return 0;
+    }
+    return (jlong)(intptr_t)handle;
+}
+
+JNIEXPORT void JNICALL
+Java_com_tpv_bench_TpvNative_visionResetV3(JNIEnv *env, jobject thiz, jlong handle_value) {
+    (void)env; (void)thiz;
+    VisionHandle *handle = vision_handle_from_jlong(handle_value);
+    if (handle && handle->ctx) tpv_vision_reset(handle->ctx);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tpv_bench_TpvNative_visionCloseV3(JNIEnv *env, jobject thiz, jlong handle_value) {
+    (void)env; (void)thiz;
+    VisionHandle *handle = vision_handle_from_jlong(handle_value);
+    if (!handle) return;
+    free(handle->mem);
+    memset(handle, 0, sizeof *handle);
+    free(handle);
+}
+
+JNIEXPORT jobject JNICALL
+Java_com_tpv_bench_TpvNative_processVisionFrameV3(
+    JNIEnv *env, jobject thiz,
+    jlong handle_value,
+    jbyteArray y,
+    jint w,
+    jint h,
+    jlongArray out_timing_ns)
+{
+    (void)thiz;
+    jlong t_jni_enter = monotonic_ns();
+
+    if (init_cache_v3(env) < 0) {
+        throw_illegal_state(env, "tpv_jni: v3 cache init failed");
+        return NULL;
+    }
+
+    VisionHandle *handle = vision_handle_from_jlong(handle_value);
+    if (!handle || !handle->ctx) {
+        throw_illegal_state(env, "tpv_jni: invalid vision handle");
+        return NULL;
+    }
+
+    const jsize n = (jsize)(w * h);
+    if (n <= 0 || n > (jsize)sizeof s_frame_buf) {
+        throw_illegal_state(env, "tpv_jni: Y buffer size out of bounds");
+        return NULL;
+    }
+    (*env)->GetByteArrayRegion(env, y, 0, n, (jbyte *)s_frame_buf);
+
+    tpv_vision_frame frame;
+    memset(&frame, 0, sizeof frame);
+    frame.data = s_frame_buf;
+    frame.width = w;
+    frame.height = h;
+    frame.stride = w;
+    frame.format = TPV_PIXEL_Y8_640X480;
+    frame.rotation_degrees = 0;
+    frame.timestamp_ns = t_jni_enter;
+
+    tpv_vision_detection detections[16];
+    tpv_vision_result result;
+    memset(&result, 0, sizeof result);
+    result.detections = detections;
+    result.detection_capacity = 16;
+
+    jlong t_tpv_enter = monotonic_ns();
+    int rc = tpv_vision_process(handle->ctx, &frame, &result);
+    jlong t_tpv_exit = monotonic_ns();
+
+    jlong times[3] = { t_jni_enter, t_tpv_enter, t_tpv_exit };
+    (*env)->SetLongArrayRegion(env, out_timing_ns, 0, 3, times);
+
+    int count = result.detection_count;
+    if (count < 0) count = 0;
+    if (count > 16) count = 16;
+
+    jobjectArray det_array = (*env)->NewObjectArray(env, count,
+        s_cache_v3.vision_det_cls, NULL);
+    if (!det_array) return NULL;
+
+    for (int i = 0; i < count; i++) {
+        const tpv_vision_detection *d = &detections[i];
+        jobject bbox_obj = (*env)->NewObject(env, s_cache_v3.bbox_cls,
+            s_cache_v3.bbox_ctor,
+            (jint)d->bbox_x, (jint)d->bbox_y,
+            (jint)d->bbox_w, (jint)d->bbox_h);
+        if (!bbox_obj) return NULL;
+
+        jobject det_obj = (*env)->NewObject(env, s_cache_v3.vision_det_cls,
+            s_cache_v3.vision_det_ctor,
+            (jint)d->engine_id,
+            (jlong)d->detection_id,
+            (jlong)d->track_id,
+            (jint)d->flags,
+            (jint)d->class_id,
+            (jint)d->confidence_q8,
+            (jint)d->status,
+            (jint)d->center_x,
+            (jint)d->center_y,
+            bbox_obj,
+            (jint)d->theta_x10,
+            (jint)d->track_age_frames,
+            (jint)d->track_hits,
+            (jint)d->track_misses);
+        if (!det_obj) return NULL;
+        (*env)->SetObjectArrayElement(env, det_array, i, det_obj);
+    }
+
+    return (*env)->NewObject(env, s_cache_v3.vision_result_cls,
+        s_cache_v3.vision_result_ctor,
+        (jint)rc,
+        (jint)result.primary_event_engine,
+        det_array);
 }
 
 JNIEXPORT jint JNICALL

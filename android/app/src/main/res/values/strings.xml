@@ -4,5 +4,6 @@
     <string name="btn_start">Start</string>
     <string name="btn_stop">Stop</string>
     <string name="btn_export">Export zip</string>
+    <string name="btn_mode_object">Mode: Object</string>
     <string name="btn_settings">⚙</string>
 </resources>

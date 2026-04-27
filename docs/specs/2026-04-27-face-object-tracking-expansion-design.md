@@ -1,9 +1,16 @@
 # Face Recognition and Object Tracking Expansion Design
 
 Date: 2026-04-27
-Status: Accepted
+Status: Accepted for Android demo spike; superseded for SDK delivery by
+`docs/specs/2026-04-27-c-first-vision-sdk-architecture.md`
 Scope: Extend the Android bench app and vision pipeline from TPV blob detection
 to face detection/recognition and generic object tracking.
+
+> SDK delivery note: this document describes the Android bench-app expansion
+> architecture. Third-party product APIs must follow the C-first SDK
+> architecture. Android `VisionEngine` / MediaPipe `FaceEngine` implementations
+> are prototypes until equivalent functionality is exposed through `libtpv.so`
+> C ABI.
 
 ---
 
@@ -20,6 +27,7 @@ are binding for the first implementation plan.
 | Event trigger | Default v3 event source is a single run-locked `primary_event_engine`. Additional engines provide overlay/tracks but do not commit events unless explicitly configured. | Avoid ambiguous OR/AND semantics across TPV/face/object detections. |
 | Tracker milestone | Tracker core can be built before face/object engines, but real multi-detection acceptance starts with Face/Object milestones. | Current TPV v2 only emits one winner, so it cannot validate multi-object tracking by itself. |
 | Orientation | First expansion remains **landscape-only**. Portrait support is a separate design because it changes camera/overlay coordinate contracts. | Current overlay correctness relies on the landscape lock and `fillCenter` mapping. |
+| SDK boundary | **C ABI is the product boundary.** Android engines are demo/spike layers only. | The project is a C library with an app demo; third parties should not depend on Kotlin `VisionEngine` classes. |
 
 ---
 
@@ -769,6 +777,10 @@ Deliverables:
 - Face bbox/landmarks overlay.
 - Per-engine timing.
 - Settings toggle.
+
+Implementation note: the first M3 slice is live detection/tracking only. TPV
+remains the primary event engine, and face landmarks/crops/identity data are not
+exported by default.
 
 Validation:
 

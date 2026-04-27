@@ -1,5 +1,11 @@
 package com.tpv.bench
 
+import com.tpv.bench.vision.RectI
+import com.tpv.bench.vision.FACE_ENGINE_ID
+import com.tpv.bench.vision.TPV_BLOB_ENGINE_ID
+import com.tpv.bench.vision.TrackState
+import com.tpv.bench.vision.TrackedDetection
+import com.tpv.bench.vision.VisionDetection
 import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -26,8 +32,68 @@ class RunRecorderTest {
         nStable = 3, kEmpty = 5, mDriftPx = 30,
         requestedW = 640, requestedH = 480,
         nativeW = 1280, nativeH = 720,
+        cameraLensFacing = "back",
         cropX = 160, cropY = 0, cropW = 960, cropH = 720,
-        downsampleRatioX = 1.5, downsampleRatioY = 1.5
+        downsampleRatioX = 1.5, downsampleRatioY = 1.5,
+        vision = visionConfig(),
+    )
+
+    private fun visionConfig(
+        binThreshold: Int = 137,
+        darkObjectMode: Boolean = true,
+        trackerEnabled: Boolean = true,
+        includeFace: Boolean = false,
+        faceEnabled: Boolean = includeFace,
+        tpvEnabled: Boolean = true,
+        primaryEngine: String = TPV_BLOB_ENGINE_ID,
+    ) = VisionRunConfig(
+        schemaVersion = 1,
+        engines = listOfNotNull(
+            VisionEngineRunConfig(
+                id = TPV_BLOB_ENGINE_ID,
+                type = "native_c",
+                version = "v2",
+                modelSha256 = "b".repeat(64),
+                providerVersion = null,
+                requiredInputs = listOf("Y640"),
+                params = TpvBlobRunParams(
+                    binThreshold = binThreshold,
+                    darkObjectMode = darkObjectMode,
+                    roiX = 0,
+                    roiY = 0,
+                    roiW = 640,
+                    roiH = 480,
+                ),
+                enabled = tpvEnabled,
+            ),
+            if (includeFace) VisionEngineRunConfig(
+                id = FACE_ENGINE_ID,
+                type = "mediapipe_tasks",
+                version = "face_detector",
+                modelSha256 = "c".repeat(64),
+                providerVersion = "mediapipe-tasks-test",
+                requiredInputs = listOf("ARGB8888"),
+                params = FaceRunParams(
+                    modelAssetPath = "blaze_face_short_range.tflite",
+                    minDetectionConfidence = 0.5f,
+                    minSuppressionThreshold = 0.3f,
+                ),
+                enabled = faceEnabled,
+            ) else null,
+        ),
+        eventPolicy = VisionEventPolicyRunConfig(
+            mode = "PRIMARY_ONLY",
+            primaryEventEngine = primaryEngine,
+            enabledCommitEngines = listOf(primaryEngine),
+        ),
+        tracker = VisionTrackerRunConfig(
+            type = if (trackerEnabled) "sort_like" else "noop",
+            enabled = trackerEnabled,
+            minHits = 2,
+            maxAge = 10,
+            iouThreshold = 0.25f,
+            centerDistancePx = 80f,
+        ),
     )
 
     private fun dummyDebug(classId: Int) = TpvDetectionDebugV2(
@@ -55,6 +121,7 @@ class RunRecorderTest {
         assertEquals(137, j.getJSONObject("tpv").getInt("bin_threshold"))
         assertEquals(3, j.getJSONObject("trigger").getInt("n_stable"))
         val crop = j.getJSONObject("camera").getJSONObject("crop")
+        assertEquals("back", j.getJSONObject("camera").getString("lens_facing"))
         assertEquals(160, crop.getInt("x"))
         assertEquals(960, crop.getInt("w"))
         assertEquals("v2", j.getString("ui_version"))
@@ -62,6 +129,90 @@ class RunRecorderTest {
         val roi = j.getJSONObject("tpv").getJSONObject("roi")
         assertEquals(0, roi.getInt("x"))
         assertEquals(640, roi.getInt("w"))
+        val vision = j.getJSONObject("vision")
+        assertEquals(1, vision.getInt("schema_version"))
+        val engine = vision.getJSONArray("engines").getJSONObject(0)
+        assertEquals(TPV_BLOB_ENGINE_ID, engine.getString("id"))
+        assertEquals("Y640", engine.getJSONArray("required_inputs").getString(0))
+        assertEquals(137, engine.getJSONObject("params").getInt("bin_threshold"))
+        assertEquals(
+            j.getJSONObject("tpv").getInt("bin_threshold"),
+            engine.getJSONObject("params").getInt("bin_threshold"),
+        )
+    }
+
+    @Test
+    fun `meta json writes face engine config without privacy exports`() {
+        val rec = RunRecorder(
+            tmp.root,
+            meta().copy(vision = visionConfig(
+                includeFace = true,
+                tpvEnabled = false,
+                primaryEngine = FACE_ENGINE_ID,
+            )),
+        )
+        rec.start()
+
+        val metaJson = JSONObject(File(tmp.root, "meta.json").readText())
+        assertEquals("v3", metaJson.getString("ui_version"))
+        val vision = metaJson.getJSONObject("vision")
+        val face = vision.getJSONArray("engines").getJSONObject(1)
+        assertEquals(FACE_ENGINE_ID, face.getString("id"))
+        assertEquals("mediapipe_tasks", face.getString("type"))
+        assertEquals("ARGB8888", face.getJSONArray("required_inputs").getString(0))
+        val params = face.getJSONObject("params")
+        assertEquals(false, params.getBoolean("persist_landmarks"))
+        assertEquals(false, params.getBoolean("persist_crops"))
+        assertEquals(false, params.getBoolean("persist_identity"))
+    }
+
+    @Test
+    fun `meta json records object mode with face engine disabled`() {
+        val rec = RunRecorder(
+            tmp.root,
+            meta().copy(vision = visionConfig(
+                includeFace = true,
+                faceEnabled = false,
+                tpvEnabled = true,
+                primaryEngine = TPV_BLOB_ENGINE_ID,
+            )),
+        )
+        rec.start()
+
+        val metaJson = JSONObject(File(tmp.root, "meta.json").readText())
+        val vision = metaJson.getJSONObject("vision")
+        val engines = vision.getJSONArray("engines")
+        val objectEngine = engines.getJSONObject(0)
+        val faceEngine = engines.getJSONObject(1)
+        assertEquals(TPV_BLOB_ENGINE_ID, objectEngine.getString("id"))
+        assertEquals(true, objectEngine.getBoolean("enabled"))
+        assertEquals(FACE_ENGINE_ID, faceEngine.getString("id"))
+        assertEquals(false, faceEngine.getBoolean("enabled"))
+        assertEquals(TPV_BLOB_ENGINE_ID, vision.getJSONObject("event_policy").getString("primary_event_engine"))
+    }
+
+    @Test
+    fun `meta json records face mode with object engine disabled`() {
+        val rec = RunRecorder(
+            tmp.root,
+            meta().copy(vision = visionConfig(
+                includeFace = true,
+                tpvEnabled = false,
+                primaryEngine = FACE_ENGINE_ID,
+            )),
+        )
+        rec.start()
+
+        val metaJson = JSONObject(File(tmp.root, "meta.json").readText())
+        val vision = metaJson.getJSONObject("vision")
+        val engines = vision.getJSONArray("engines")
+        val objectEngine = engines.getJSONObject(0)
+        val faceEngine = engines.getJSONObject(1)
+        assertEquals(TPV_BLOB_ENGINE_ID, objectEngine.getString("id"))
+        assertEquals(false, objectEngine.getBoolean("enabled"))
+        assertEquals(FACE_ENGINE_ID, faceEngine.getString("id"))
+        assertEquals(true, faceEngine.getBoolean("enabled"))
+        assertEquals(FACE_ENGINE_ID, vision.getJSONObject("event_policy").getString("primary_event_engine"))
     }
 
     @Test
@@ -119,6 +270,47 @@ class RunRecorderTest {
         val dsq = j.getJSONArray("distances_sq")
         assertEquals(5, dsq.length())
         assertEquals(111111, dsq.getInt(3))
+        assertEquals(0, j.getJSONArray("tracks").length())
+    }
+
+    @Test
+    fun `recordEvent writes tracks array`() {
+        val rec = RunRecorder(tmp.root, meta())
+        rec.start()
+        val track = TrackedDetection(
+            detection = VisionDetection(
+                engineId = TPV_BLOB_ENGINE_ID,
+                detectionId = 99,
+                frameIdxInRun = 42,
+                classId = 0xFF,
+                className = "tpv_rejected",
+                score = 0f,
+                bbox640 = RectI(254, 157, 268, 153),
+            ),
+            trackId = 3,
+            state = TrackState.CONFIRMED,
+            ageFrames = 2,
+            hits = 2,
+            misses = 0,
+        )
+        rec.recordEvent(
+            CommittedEvent(1, 5, dummyDebug(0xFF), 0xFF, mapOf(0xFF to 1), false),
+            1L,
+            rawY = ByteArray(640 * 480),
+            overlayJpeg = ByteArray(4),
+            mask = ByteArray(640 * 480 / 8),
+            tracks = listOf(track),
+        )
+        rec.close()
+
+        val tracks = JSONObject(File(tmp.root, "log.jsonl").readLines().single())
+            .getJSONArray("tracks")
+        val j = tracks.getJSONObject(0)
+        assertEquals(3, j.getInt("track_id"))
+        assertEquals(TPV_BLOB_ENGINE_ID, j.getString("engine"))
+        assertEquals("tpv_rejected", j.getString("class_name"))
+        assertEquals("confirmed", j.getString("state"))
+        assertEquals(254, j.getJSONObject("bbox").getInt("x"))
     }
 
     @Test

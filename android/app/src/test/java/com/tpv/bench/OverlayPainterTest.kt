@@ -1,5 +1,10 @@
 package com.tpv.bench
 
+import com.tpv.bench.vision.RectI
+import com.tpv.bench.vision.TPV_BLOB_ENGINE_ID
+import com.tpv.bench.vision.TrackState
+import com.tpv.bench.vision.TrackedDetection
+import com.tpv.bench.vision.VisionDetection
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -46,6 +51,56 @@ class OverlayPainterTest {
         val (vx, vy) = OverlayPainter.mapNativeToView(320, 240, t)
         assertEquals(1520f, vx, 0.001f)
         assertEquals(876f, vy, 0.001f)
+    }
+
+    @Test
+    fun `track label uses id and class name`() {
+        assertEquals("#3 tpv_rejected", OverlayPainter.trackLabel(track(3)))
+    }
+
+    @Test
+    fun `track label anchor maps bbox top left through crop and view transform`() {
+        val t = OverlayPainter.previewFillCenterTransform(
+            viewW = 3040, viewH = 1752,
+            nativeW = 640, nativeH = 480,
+        )
+        val (vx, vy) = OverlayPainter.trackLabelAnchor(RectI(320, 240, 40, 40), YuvAdapter.CropRect(0, 0, 640, 480), t)
+        assertEquals(1520f, vx, 0.001f)
+        assertEquals(876f, vy, 0.001f)
+    }
+
+    @Test
+    fun `mirrored track label anchor uses visual left edge`() {
+        val t = OverlayPainter.previewFillCenterTransform(
+            viewW = 640, viewH = 480,
+            nativeW = 640, nativeH = 480,
+        )
+        val (vx, vy) = OverlayPainter.trackLabelAnchor(
+            RectI(100, 50, 40, 20),
+            YuvAdapter.CropRect(0, 0, 640, 480),
+            t,
+            mirrorX = true,
+        )
+        assertEquals(500f, vx, 0.001f)
+        assertEquals(50f, vy, 0.001f)
+    }
+
+    @Test
+    fun `bbox view rect maps and mirrors face boxes`() {
+        val t = OverlayPainter.previewFillCenterTransform(
+            viewW = 640, viewH = 480,
+            nativeW = 640, nativeH = 480,
+        )
+        val rect = OverlayPainter.bboxToViewRect(
+            RectI(100, 50, 40, 20),
+            YuvAdapter.CropRect(0, 0, 640, 480),
+            t,
+            mirrorX = true,
+        )
+        assertEquals(500f, rect.left, 0.001f)
+        assertEquals(50f, rect.top, 0.001f)
+        assertEquals(540f, rect.right, 0.001f)
+        assertEquals(70f, rect.bottom, 0.001f)
     }
 
     @Test
@@ -172,4 +227,21 @@ class OverlayPainterTest {
             assertTrue(e.message!!.contains("out size"))
         }
     }
+
+    private fun track(trackId: Long) = TrackedDetection(
+        detection = VisionDetection(
+            engineId = TPV_BLOB_ENGINE_ID,
+            detectionId = trackId,
+            frameIdxInRun = 1,
+            classId = 0xFF,
+            className = "tpv_rejected",
+            score = 0f,
+            bbox640 = RectI(0, 0, 10, 10),
+        ),
+        trackId = trackId,
+        state = TrackState.CONFIRMED,
+        ageFrames = 2,
+        hits = 2,
+        misses = 0,
+    )
 }

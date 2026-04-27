@@ -1,5 +1,12 @@
 # Face/Object Tracking Expansion — M1/M2 Implementation Plan
 
+> **SDK delivery note:** This plan is useful for Android bench-app scaffolding,
+> but it is not the final third-party SDK architecture. Product face/object/
+> tracking functionality must follow
+> `docs/plans/2026-04-27-c-first-vision-sdk-implementation-plan.md` and be
+> exposed through `libtpv.so` C ABI. Kotlin `VisionEngine` code is prototype/demo
+> infrastructure until C parity exists.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > `superpowers:subagent-driven-development` or
 > `superpowers:executing-plans` to implement this plan task-by-task. Steps use
@@ -835,6 +842,10 @@ adb -s HA25YBM0 shell am start -n com.tpv.bench/.MainActivity
 ---
 
 ## 16. Out of Scope for This Plan
+
+Note: this section describes the original M1/M2 plan boundary. The later M3
+face-detection slice is tracked in
+`docs/plans/2026-04-27-face-detection-m3-implementation-note.md`.
 
 - MediaPipe Tasks dependency and `FaceEngine`.
 - LiteRT/TFLite/ONNX Runtime dependency and `ObjectEngine`.

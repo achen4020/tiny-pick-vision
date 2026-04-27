@@ -25,7 +25,8 @@ SHA256_CMD := $(shell command -v shasum >/dev/null 2>&1 && echo "shasum -a 256" 
 
 SRCS = src/threshold.c src/ccl_moments.c src/shape_features.c \
        src/classifier.c src/pose.c src/pipeline.c src/platform_glue.c \
-       src/fixed_math.c
+       src/fixed_math.c src/vision_api.c src/vision_tracker.c \
+       src/vision_policy.c
 
 HOST_OBJS = $(patsubst src/%.c,build/host/%.o,$(SRCS))
 
@@ -59,16 +60,16 @@ build/libtpv-arm.so: $(SRCS) src/model_data.c | build
 	$(CC_TARGET) $(CFLAGS_TARGET) -shared -o $@ $(SRCS) src/model_data.c
 
 build/test_%: tests/test_%.c tests/testlib.c $(SRCS) tests/stub_model_data.c | build
-	$(CC_HOST) $(CFLAGS_HOST) -o $@ $^ -lm
+	$(CC_HOST) $(CFLAGS_HOST) -o $@ $(filter %.c,$^) -lm
 
 # test_debug_api needs TPV_DEBUG_FEATURES turned on so the debug
 # function is visible. Everything else on the host toolchain.
 build/test_debug_api: tests/test_debug_api.c tests/testlib.c $(SRCS) tests/stub_model_data.c | build
-	$(CC_HOST) $(CFLAGS_HOST) -DTPV_DEBUG_FEATURES -o $@ $^ -lm
+	$(CC_HOST) $(CFLAGS_HOST) -DTPV_DEBUG_FEATURES -o $@ $(filter %.c,$^) -lm
 
 # v2 debug entry point test: same TPV_DEBUG_FEATURES guard.
 build/test_debug_api_v2: tests/test_debug_api_v2.c tests/testlib.c $(SRCS) tests/stub_model_data.c | build
-	$(CC_HOST) $(CFLAGS_HOST) -DTPV_DEBUG_FEATURES -o $@ $^ -lm
+	$(CC_HOST) $(CFLAGS_HOST) -DTPV_DEBUG_FEATURES -o $@ $(filter %.c,$^) -lm
 
 # Host-side regression replay MUST link the real calibrated model_data.c so
 # the CSV represents actual production decisions. Linking tests/stub_model_data
@@ -77,7 +78,7 @@ build/test_debug_api_v2: tests/test_debug_api_v2.c tests/testlib.c $(SRCS) tests
 # is absent, make stops with "No rule to make target" — the correct signal to
 # run the calibration tool first.
 build/replay: tools/replay.c $(SRCS) src/model_data.c | build
-	$(CC_HOST) $(CFLAGS_HOST) -DTPV_DEBUG_FEATURES -o $@ $^ -lm
+	$(CC_HOST) $(CFLAGS_HOST) -DTPV_DEBUG_FEATURES -o $@ $(filter %.c,$^) -lm
 
 check-layout: tests/check_layout.c | build
 	$(CC_HOST) $(CFLAGS_HOST) -c $< -o build/check_layout.o

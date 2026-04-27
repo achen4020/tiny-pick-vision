@@ -7,6 +7,10 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.View
+import com.tpv.bench.vision.FACE_ENGINE_ID
+import com.tpv.bench.vision.TrackState
+import com.tpv.bench.vision.TPV_BLOB_ENGINE_ID
+import com.tpv.bench.vision.TrackedDetection
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.cos
 import kotlin.math.sin
@@ -40,6 +44,8 @@ class OverlayView @JvmOverloads constructor(
         val roi: YuvAdapter.CropRect,         // ROI in 640×480 coords
         val crop: YuvAdapter.CropRect,        // camera→640×480 crop
         val nativeW: Int, val nativeH: Int,
+        val tracks: List<TrackedDetection>,
+        val mirrorX: Boolean,
     )
     private data class CommitState(
         val eventClassId: Int,
@@ -67,6 +73,25 @@ class OverlayView @JvmOverloads constructor(
         strokeWidth = 12f
         this.color = OverlayPainter.GREEN_FLASH_ARGB
     }
+    private val trackTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 28f
+        color = OverlayPainter.YELLOW_ROI_ARGB
+        setShadowLayer(4f, 1f, 1f, 0xCC000000.toInt())
+    }
+    private val faceBoxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        color = OverlayPainter.CYAN_FACE_ARGB
+    }
+    private val faceTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 28f
+        color = OverlayPainter.CYAN_FACE_ARGB
+        setShadowLayer(4f, 1f, 1f, 0xCC000000.toInt())
+    }
+    private val faceLandmarkPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = OverlayPainter.CYAN_FACE_ARGB
+    }
 
     // Cached buffers for mask rendering. onDraw runs at ~24 fps; pre-allocating
     // avoids 2.4 MB / frame Java heap churn (~58 MB/s GC pressure). Reuse via
@@ -80,8 +105,10 @@ class OverlayView @JvmOverloads constructor(
         roi: YuvAdapter.CropRect,
         crop: YuvAdapter.CropRect,
         nativeW: Int, nativeH: Int,
+        tracks: List<TrackedDetection> = emptyList(),
+        mirrorX: Boolean = false,
     ) {
-        live.set(LiveState(d, roi, crop, nativeW, nativeH))
+        live.set(LiveState(d, roi, crop, nativeW, nativeH, tracks, mirrorX))
         postInvalidate()
     }
 
@@ -117,14 +144,31 @@ class OverlayView @JvmOverloads constructor(
 
         // ---- 1. Yellow ROI rectangle (drawn every frame, regardless of status) ----
         // ROI is in 640×480 coords; map both corners through crop → native → view.
-        val (roiNx0, roiNy0) = OverlayPainter.mapCoord(f.roi.x, f.roi.y, f.crop)
+        val (roiNx0, roiNy0) = OverlayPainter.mapCoord(f.roi.x, f.roi.y, f.crop, f.mirrorX)
         val (roiNx1, roiNy1) = OverlayPainter.mapCoord(
-            f.roi.x + f.roi.w, f.roi.y + f.roi.h, f.crop)
+            f.roi.x + f.roi.w, f.roi.y + f.roi.h, f.crop, f.mirrorX)
         val (roiVx0, roiVy0) = OverlayPainter.mapNativeToView(roiNx0, roiNy0, viewTransform)
         val (roiVx1, roiVy1) = OverlayPainter.mapNativeToView(roiNx1, roiNy1, viewTransform)
         canvas.drawRect(
-            roiVx0, roiVy0, roiVx1, roiVy1, roiPaint
+            minOf(roiVx0, roiVx1), minOf(roiVy0, roiVy1),
+            maxOf(roiVx0, roiVx1), maxOf(roiVy0, roiVy1),
+            roiPaint
         )
+
+        for (track in f.tracks) {
+            if (track.state != TrackState.CONFIRMED) continue
+            if (track.detection.engineId != FACE_ENGINE_ID) continue
+            val rect = OverlayPainter.bboxToViewRect(
+                track.detection.bbox640, f.crop, viewTransform, f.mirrorX)
+            canvas.drawRect(rect.left, rect.top, rect.right, rect.bottom, faceBoxPaint)
+            val labelY = (rect.top - 8f).coerceAtLeast(faceTextPaint.textSize)
+            canvas.drawText(OverlayPainter.trackLabel(track), rect.left, labelY, faceTextPaint)
+            for (point in track.detection.landmarks640) {
+                val (nx, ny) = OverlayPainter.mapCoord(point.x, point.y, f.crop, f.mirrorX)
+                val (vx, vy) = OverlayPainter.mapNativeToView(nx, ny, viewTransform)
+                canvas.drawCircle(vx, vy, 4f, faceLandmarkPaint)
+            }
+        }
 
         // ---- 2. Green mask fill + red center dot + short axis line ----
         // Only draw when the C side reported TPV_OK (status == 0). On
@@ -143,10 +187,17 @@ class OverlayView @JvmOverloads constructor(
             val dstRight  = viewTransform.offsetX + (f.crop.x + f.crop.w) * viewTransform.scale
             val dstBottom = viewTransform.offsetY + (f.crop.y + f.crop.h) * viewTransform.scale
             val dstRect = RectF(dstLeft, dstTop, dstRight, dstBottom)
-            canvas.drawBitmap(maskBitmap, null, dstRect, null)
+            if (f.mirrorX) {
+                canvas.save()
+                canvas.scale(-1f, 1f, dstRect.centerX(), dstRect.centerY())
+                canvas.drawBitmap(maskBitmap, null, dstRect, null)
+                canvas.restore()
+            } else {
+                canvas.drawBitmap(maskBitmap, null, dstRect, null)
+            }
 
             // Red center dot
-            val (nx, ny) = OverlayPainter.mapCoord(f.d.det.x, f.d.det.y, f.crop)
+            val (nx, ny) = OverlayPainter.mapCoord(f.d.det.x, f.d.det.y, f.crop, f.mirrorX)
             val (cx, cy) = OverlayPainter.mapNativeToView(nx, ny, viewTransform)
             val dotR = (f.crop.w * 0.015f * viewTransform.scale).coerceAtLeast(4f)
             canvas.drawCircle(cx, cy, dotR, centerPaint)
@@ -154,12 +205,26 @@ class OverlayView @JvmOverloads constructor(
             // Short axis line
             val axisLen = (f.crop.w * 0.04f * viewTransform.scale).coerceAtLeast(8f)
             val thetaRad = Math.toRadians(f.d.det.thetaX10 / 10.0)
+            val axisDx = if (f.mirrorX) -cos(thetaRad) else cos(thetaRad)
             canvas.drawLine(
                 cx, cy,
-                (cx + axisLen * cos(thetaRad)).toFloat(),
+                (cx + axisLen * axisDx).toFloat(),
                 (cy + axisLen * sin(thetaRad)).toFloat(),
                 axisPaint
             )
+
+            for (track in f.tracks) {
+                if (track.state != TrackState.CONFIRMED) continue
+                if (track.detection.engineId != TPV_BLOB_ENGINE_ID) continue
+                val (tx, ty) = OverlayPainter.trackLabelAnchor(
+                    track.detection.bbox640, f.crop, viewTransform, f.mirrorX)
+                canvas.drawText(
+                    OverlayPainter.trackLabel(track),
+                    tx,
+                    (ty - 8f).coerceAtLeast(trackTextPaint.textSize),
+                    trackTextPaint,
+                )
+            }
         }
 
         // ---- 3. Commit flash (persistent until flashEndMs) ----

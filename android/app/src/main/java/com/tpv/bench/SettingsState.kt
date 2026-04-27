@@ -3,6 +3,22 @@ package com.tpv.bench
 import android.content.Context
 import androidx.core.content.edit
 
+enum class RecognitionMode {
+    OBJECT,
+    FACE;
+
+    val displayName: String
+        get() = when (this) {
+            OBJECT -> "Object"
+            FACE -> "Face"
+        }
+
+    companion object {
+        fun fromStored(value: String?): RecognitionMode =
+            values().firstOrNull { it.name == value } ?: OBJECT
+    }
+}
+
 /**
  * Persistent Settings for the trigger machine. Locked while a run is active
  * (MainActivity enforces this by disabling the button).
@@ -54,4 +70,53 @@ class SettingsState(context: Context) {
     var roiH: Int
         get() = prefs.getInt("roi_h", 480).coerceIn(1, 480)
         set(v) = prefs.edit { putInt("roi_h", v.coerceIn(1, 480)) }
+
+    var trackerEnabled: Boolean
+        get() = prefs.getBoolean("tracker_enabled", true)
+        set(v) = prefs.edit { putBoolean("tracker_enabled", v) }
+
+    var trackerMinHits: Int
+        get() = prefs.getInt("tracker_min_hits", 2).coerceIn(1, 30)
+        set(v) = prefs.edit { putInt("tracker_min_hits", v.coerceIn(1, 30)) }
+
+    var trackerMaxAge: Int
+        get() = prefs.getInt("tracker_max_age", 10).coerceIn(0, 120)
+        set(v) = prefs.edit { putInt("tracker_max_age", v.coerceIn(0, 120)) }
+
+    var trackerIouThresholdPct: Int
+        get() = prefs.getInt("tracker_iou_threshold_pct", 25).coerceIn(0, 100)
+        set(v) = prefs.edit { putInt("tracker_iou_threshold_pct", v.coerceIn(0, 100)) }
+
+    var trackerCenterDistancePx: Int
+        get() = prefs.getInt("tracker_center_distance_px", 80).coerceIn(0, 640)
+        set(v) = prefs.edit { putInt("tracker_center_distance_px", v.coerceIn(0, 640)) }
+
+    var recognitionMode: RecognitionMode
+        get() {
+            val stored = prefs.getString("recognition_mode", null)
+            if (stored != null) return RecognitionMode.fromStored(stored)
+            return if (prefs.getBoolean("face_enabled", false)) {
+                RecognitionMode.FACE
+            } else {
+                RecognitionMode.OBJECT
+            }
+        }
+        set(v) = prefs.edit {
+            putString("recognition_mode", v.name)
+            putBoolean("face_enabled", v == RecognitionMode.FACE)
+        }
+
+    var faceEnabled: Boolean
+        get() = recognitionMode == RecognitionMode.FACE
+        set(v) {
+            recognitionMode = if (v) RecognitionMode.FACE else RecognitionMode.OBJECT
+        }
+
+    var faceMinDetectionConfidencePct: Int
+        get() = prefs.getInt("face_min_detection_confidence_pct", 50).coerceIn(1, 100)
+        set(v) = prefs.edit { putInt("face_min_detection_confidence_pct", v.coerceIn(1, 100)) }
+
+    var faceMinSuppressionThresholdPct: Int
+        get() = prefs.getInt("face_min_suppression_threshold_pct", 30).coerceIn(0, 100)
+        set(v) = prefs.edit { putInt("face_min_suppression_threshold_pct", v.coerceIn(0, 100)) }
 }

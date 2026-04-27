@@ -14,6 +14,8 @@
         app:layout_constraintTop_toTopOf="parent">
         <Button android:id="@+id/btn_start"    android:layout_width="wrap_content"
                 android:layout_height="wrap_content" android:text="@string/btn_start" />
+        <Button android:id="@+id/btn_mode"     android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="@string/btn_mode_object" />
         <Button android:id="@+id/btn_stop"     android:layout_width="wrap_content"
                 android:layout_height="wrap_content" android:text="@string/btn_stop"
                 android:enabled="false" />
@@ -22,6 +24,8 @@
                 android:enabled="false" />
         <Button android:id="@+id/btn_settings" android:layout_width="wrap_content"
                 android:layout_height="wrap_content" android:text="@string/btn_settings" />
+        <Button android:id="@+id/btn_camera"   android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="Cam: Back" />
         <Button android:id="@+id/btn_diag"     android:layout_width="wrap_content"
                 android:layout_height="wrap_content" android:text="Diag" />
         <Button android:id="@+id/btn_roi"      android:layout_width="wrap_content"

@@ -13,8 +13,25 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
+enum class BenchCameraLens(
+    val lensFacing: Int,
+    val jsonName: String,
+    val buttonLabel: String,
+    val mirrorPreviewX: Boolean,
+) {
+    BACK(CameraSelector.LENS_FACING_BACK, "back", "Cam: Back", false),
+    FRONT(CameraSelector.LENS_FACING_FRONT, "front", "Cam: Front", true);
+
+    fun toggled(): BenchCameraLens = if (this == BACK) FRONT else BACK
+
+    companion object {
+        fun fromLensFacing(lensFacing: Int): BenchCameraLens =
+            values().firstOrNull { it.lensFacing == lensFacing } ?: BACK
+    }
+}
+
 /**
- * Binds a back-facing camera via CameraX and hands every YUV_420_888 frame
+ * Binds a selected camera via CameraX and hands every YUV_420_888 frame
  * to `onFrame`. Uses STRATEGY_KEEP_ONLY_LATEST so the pipeline never queues.
  * CameraX does not notify when a frame is dropped; MainActivity estimates
  * skipped-frame counts from arrival-gap statistics.
@@ -38,32 +55,46 @@ class CameraAdapter(private val ctx: Context) {
     fun start(
         lifecycleOwner: LifecycleOwner,
         previewView: PreviewView,
+        lens: BenchCameraLens,
+        onError: (Throwable) -> Unit = {},
         onFrame: (proxy: ImageProxy) -> Unit,
     ) {
         cancelled.set(false)
+        nativeW = 0
+        nativeH = 0
         val fut = ProcessCameraProvider.getInstance(ctx)
         fut.addListener({
             if (cancelled.get()) return@addListener   // stop() beat us here
-            val p = fut.get()
-            provider = p
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(previewView.surfaceProvider)
+            try {
+                val p = fut.get()
+                provider = p
+                val selector = CameraSelector.Builder()
+                    .requireLensFacing(lens.lensFacing)
+                    .build()
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
+                val analysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                    .setTargetResolution(android.util.Size(640, 480))
+                    .build()
+                analysis.setAnalyzer(executor) { proxy ->
+                    if (nativeW == 0) { nativeW = proxy.width ; nativeH = proxy.height }
+                    onFrame(proxy)
+                }
+                p.unbindAll()
+                if (cancelled.get()) return@addListener
+                p.bindToLifecycle(
+                    lifecycleOwner,
+                    selector,
+                    preview, analysis
+                )
+            } catch (t: Throwable) {
+                provider?.unbindAll()
+                provider = null
+                onError(t)
             }
-            val analysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                .setTargetResolution(android.util.Size(640, 480))
-                .build()
-            analysis.setAnalyzer(executor) { proxy ->
-                if (nativeW == 0) { nativeW = proxy.width ; nativeH = proxy.height }
-                try { onFrame(proxy) } finally { proxy.close() }
-            }
-            p.unbindAll()
-            p.bindToLifecycle(
-                lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                preview, analysis
-            )
         }, ContextCompat.getMainExecutor(ctx))
     }
 

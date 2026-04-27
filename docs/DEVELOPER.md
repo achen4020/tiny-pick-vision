@@ -348,6 +348,11 @@ Grant the CAMERA permission, tap Start, place objects in front of the
 back camera one at a time. HUD shows state, FPS, event count. Tap Stop —
 toast shows the zip filename.
 
+`Cam: Back` / `Cam: Front` switches the selected lens while stopped. The
+choice is run-locked at Start and recorded as `meta.json.camera.lens_facing`.
+Front-camera live overlay applies horizontal preview mirroring so masks, dots,
+ROI, and track labels stay aligned with the mirrored `PreviewView`.
+
 The Activity is locked to **landscape** orientation. The back camera
 buffer is 640×480 landscape and `PreviewView` is explicitly `fillCenter`.
 `OverlayView` mirrors that same uniform center-crop transform instead of
@@ -467,3 +472,83 @@ darkObjectMode in the APP's Settings before Start.
 - v2 APP continues to parse v1 runs (no `ui_version` in meta.json)
 - v1 replay mode remains bit-identical to original v1 behavior
 - HG1-5 C tests and the 20 KB size gate are unchanged
+
+### v3 M1/M2 expansion scaffold (2026-04-27)
+
+The accepted expansion spec and implementation plan are:
+
+- `docs/specs/2026-04-27-face-object-tracking-expansion-design.md`
+- `docs/plans/2026-04-27-face-object-tracking-expansion-plan.md`
+- SDK delivery superseding architecture:
+  `docs/specs/2026-04-27-c-first-vision-sdk-architecture.md`
+- SDK delivery implementation plan:
+  `docs/plans/2026-04-27-c-first-vision-sdk-implementation-plan.md`
+
+Implemented M1/M2 behavior:
+
+- `MainActivity.onFrame()` routes TPV through `vision.VisionPipeline`; TPV
+  remains the `PRIMARY_ONLY` event source (`tpv_blob`) and `TriggerMachine`
+  behavior is unchanged.
+- NV21 conversion is lazy via `FrameScopedBufferProvider`; non-commit frames
+  do not build NV21/RGB buffers.
+- `meta.json.vision` is the source-of-truth engine metadata; legacy
+  `meta.json.tpv` is still written as a compatibility mirror derived from
+  `vision.engines[id=tpv_blob].params`.
+- `MultiObjectTracker` supplies stable track IDs for current detections.
+  `OverlayView` renders `#<track_id> <class_name>` only for confirmed,
+  valid TPV detections.
+- `log.jsonl` always includes `tracks`; zero-track events write
+  `tracks: []` for replay-tool stability.
+- The APP remains landscape-only. Do not unlock portrait without threading
+  `ImageProxy.imageInfo.rotationDegrees` through overlay mapping and updating
+  the v2/v3 docs together.
+
+### v3 M3 face detection (2026-04-27)
+
+Implemented face-detection behavior:
+
+- `FaceEngine` uses MediaPipe Tasks Vision (`com.google.mediapipe:tasks-vision`)
+  with the bundled `blaze_face_short_range.tflite` asset. It does not depend on
+  Google Play Services.
+- This MediaPipe implementation is an Android demo spike only. It must not be
+  treated as the third-party SDK implementation; SDK-ready face/object/tracking
+  features must be exposed through `libtpv.so` C ABI.
+- Face detection is run-locked and disabled by default. Enable it from
+  Settings → Face Detection; disabled runs do not request ARGB buffers.
+- TPV remains the only `PRIMARY_ONLY` commit source. Face detections are live
+  overlay/tracker signals and do not trigger `TriggerMachine` commits.
+- `FrameScopedBufferProvider` materializes ARGB lazily from NV21 only when the
+  face engine is enabled and requests it.
+- `OverlayView` draws confirmed face tracks as cyan boxes/labels/landmarks.
+  These are live-only: `RunRecorder` still writes only primary-event tracks,
+  and face crops, landmarks, identities, and embeddings are not exported by
+  default.
+- `meta.json.ui_version` remains `v2` for TPV-only runs and becomes `v3` when
+  an enabled non-TPV engine is present. `meta.json.vision.engines[id=face]`
+  records provider/model/threshold parameters and privacy export flags.
+
+This is face detection, not face recognition. Identity enrollment, embedding
+storage, encrypted gallery management, liveness, and recognition acceptance are
+still deferred to the later recognition milestone.
+
+### C-first SDK C0 ABI skeleton (2026-04-27)
+
+The first C SDK slice is additive and keeps `tpv_process_frame` unchanged:
+
+- Public multi-engine header: `include/tpv_vision.h`.
+- Implementation: `src/vision_api.c`.
+- Host tests: `tests/test_vision_api.c`.
+- Current supported mode: TPV-only `TPV_PIXEL_Y8_640X480`.
+- Unsupported C0 engines (`FACE`, `OBJECT`) are rejected at config validation
+  until later phases provide C-side implementations.
+- `tpv_vision_result` uses caller-owned detection arrays so SDK consumers do
+  not depend on runtime-owned heap allocation.
+
+Validation:
+
+```bash
+make test
+PATH="$HOME/android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/bin:$HOME/android/sdk/platform-tools:$PATH" make android-apk
+make android-verify-sha
+PATH="$HOME/android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/bin:$PATH" make size
+```

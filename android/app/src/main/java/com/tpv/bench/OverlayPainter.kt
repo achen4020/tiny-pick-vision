@@ -1,5 +1,8 @@
 package com.tpv.bench
 
+import com.tpv.bench.vision.RectI
+import com.tpv.bench.vision.TrackedDetection
+
 /**
  * Pure-logic helper for annotated-frame rendering. Any Android-free so it
  * can be unit-tested on the JVM. Callers (OverlayView, RunRecorder) apply
@@ -9,6 +12,7 @@ object OverlayPainter {
 
     data class NativeSize(val w: Int, val h: Int)
     data class ViewTransform(val scale: Float, val offsetX: Float, val offsetY: Float)
+    data class ViewRect(val left: Float, val top: Float, val right: Float, val bottom: Float)
 
     /** 5-class palette (tab10 first 5, #3 swapped to brown to avoid RED_ERR collision). */
     val PALETTE = intArrayOf(
@@ -27,6 +31,8 @@ object OverlayPainter {
     const val RED_CENTER_ARGB  = 0xFFD0021B.toInt()
     /** Commit-flash border color — pure green, opaque. (alpha set per-frame in OverlayView.) */
     const val GREEN_FLASH_ARGB = 0xFF00FF00.toInt()
+    /** Face detection overlay color. Live-only; face landmarks are not persisted by default. */
+    const val CYAN_FACE_ARGB   = 0xFF00D7FF.toInt()
 
     /** 640×480 / 8 = 38400 bytes per mask. */
     const val MASK_BYTES = 640 * 480 / 8
@@ -85,8 +91,14 @@ object OverlayPainter {
      * Map a (x_640, y_640) point from the 640×480 tpv coord system to native
      * camera-frame coordinates using the crop that the YuvAdapter recorded.
      */
-    fun mapCoord(x640: Int, y640: Int, crop: YuvAdapter.CropRect): Pair<Int, Int> {
-        val nx = crop.x + (x640.toDouble() * crop.w / 640.0).toInt()
+    fun mapCoord(
+        x640: Int,
+        y640: Int,
+        crop: YuvAdapter.CropRect,
+        mirrorX: Boolean = false,
+    ): Pair<Int, Int> {
+        val mappedX = if (mirrorX) 640 - x640 else x640
+        val nx = crop.x + (mappedX.toDouble() * crop.w / 640.0).toInt()
         val ny = crop.y + (y640.toDouble() * crop.h / 480.0).toInt()
         return nx to ny
     }
@@ -112,6 +124,36 @@ object OverlayPainter {
 
     fun mapNativeToView(x: Int, y: Int, t: ViewTransform): Pair<Float, Float> =
         (t.offsetX + x * t.scale) to (t.offsetY + y * t.scale)
+
+    fun trackLabel(track: TrackedDetection): String =
+        "#${track.trackId} ${track.detection.className}"
+
+    fun trackLabelAnchor(
+        bbox640: RectI,
+        crop: YuvAdapter.CropRect,
+        t: ViewTransform,
+        mirrorX: Boolean = false,
+    ): Pair<Float, Float> {
+        val anchorX = if (mirrorX) bbox640.x + bbox640.w else bbox640.x
+        val (nx, ny) = mapCoord(anchorX, bbox640.y, crop, mirrorX)
+        return mapNativeToView(nx, ny, t)
+    }
+
+    fun bboxToViewRect(
+        bbox640: RectI,
+        crop: YuvAdapter.CropRect,
+        t: ViewTransform,
+        mirrorX: Boolean = false,
+    ): ViewRect {
+        val (nx0, ny0) = mapCoord(bbox640.x, bbox640.y, crop, mirrorX)
+        val (nx1, ny1) = mapCoord(bbox640.x + bbox640.w, bbox640.y + bbox640.h, crop, mirrorX)
+        val (vx0, vy0) = mapNativeToView(nx0, ny0, t)
+        val (vx1, vy1) = mapNativeToView(nx1, ny1, t)
+        return ViewRect(
+            minOf(vx0, vx1), minOf(vy0, vy1),
+            maxOf(vx0, vx1), maxOf(vy0, vy1),
+        )
+    }
 
     /** Line 1 text per §5.5 three-branch rule. */
     fun textLine1(d: TpvDetectionDebugV2): String {
