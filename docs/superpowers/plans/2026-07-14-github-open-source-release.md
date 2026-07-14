@@ -488,7 +488,7 @@ git commit -m "docs: add bilingual project README"
 Run:
 
 ```bash
-risky_path_pattern='(^|/)(\.env|local\.properties|id_rsa|src/model_data\.c|.*\.(pem|key|p12|jks|keystore|zip|apk|so|iml)|(\.idea|\.vscode|\.fleet|\.settings)(/.*)?|jniLibs(/.*)?)$'
+risky_path_pattern='(^|/)(\.env(\..+)?|local\.properties|id_(rsa|ed25519|ecdsa|dsa)|src/model_data\.c|(service[-_]?account([_-][^/]*)?|credentials?|application_default_credentials|client_secret[^/]*|google-services|firebase-adminsdk[^/]*)\.json|.*\.(pem|key|p12|jks|keystore|zip|apk|so|iml)|(\.idea|\.vscode|\.fleet|\.settings)(/.*)?|jniLibs(/.*)?)$'
 tracked_paths=$(git ls-files)
 git_status=$?
 test "$git_status" -eq 0 || exit "$git_status"
@@ -529,7 +529,11 @@ Run:
 ```bash
 credential_pattern='(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[A-Za-z0-9_]{30,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|password[[:space:]]*[:=]|api[_-]?key[[:space:]]*[:=]|secret[[:space:]]*[:=])'
 found=0
-for commit in $(git rev-list --all); do
+audit_tmp=$(mktemp -d)
+git rev-list --all > "$audit_tmp/commits"
+git_status=$?
+test "$git_status" -eq 0 || exit "$git_status"
+while IFS= read -r commit; do
   credential_paths=$(git grep -I -l -E "$credential_pattern" "$commit" -- .)
   grep_status=$?
   if [ "$grep_status" -eq 0 ]; then
@@ -538,10 +542,51 @@ for commit in $(git rev-list --all); do
   elif [ "$grep_status" -ne 1 ]; then
     exit "$grep_status"
   fi
-done
+
+  git cat-file commit "$commit" > "$audit_tmp/object"
+  git_status=$?
+  test "$git_status" -eq 0 || exit "$git_status"
+  sed '1,/^$/d' "$audit_tmp/object" > "$audit_tmp/message"
+  sed_status=$?
+  test "$sed_status" -eq 0 || exit "$sed_status"
+  rg -q "$credential_pattern" "$audit_tmp/message"
+  rg_status=$?
+  if [ "$rg_status" -eq 0 ]; then
+    printf 'credential pattern match in commit message: %s\n' "$commit" >&2
+    found=1
+  elif [ "$rg_status" -ne 1 ]; then
+    exit "$rg_status"
+  fi
+done < "$audit_tmp/commits"
+
+git for-each-ref \
+  --format='%(objecttype)%09%(objectname)%09%(refname)' refs/tags \
+  > "$audit_tmp/tags"
+git_status=$?
+test "$git_status" -eq 0 || exit "$git_status"
+tab=$(printf '\t')
+while IFS="$tab" read -r object_type object_id ref; do
+  test "$object_type" = tag || continue
+  git cat-file tag "$object_id" > "$audit_tmp/object"
+  git_status=$?
+  test "$git_status" -eq 0 || exit "$git_status"
+  sed '1,/^$/d' "$audit_tmp/object" > "$audit_tmp/message"
+  sed_status=$?
+  test "$sed_status" -eq 0 || exit "$sed_status"
+  rg -q "$credential_pattern" "$audit_tmp/message"
+  rg_status=$?
+  if [ "$rg_status" -eq 0 ]; then
+    printf 'credential pattern match in annotated tag message: %s (%s)\n' \
+      "$object_id" "$ref" >&2
+    found=1
+  elif [ "$rg_status" -ne 1 ]; then
+    exit "$rg_status"
+  fi
+done < "$audit_tmp/tags"
+rm -rf "$audit_tmp"
 test "$found" -eq 0
 
-risky_path_pattern='(^|/)(\.env|local\.properties|id_rsa|src/model_data\.c|.*\.(pem|key|p12|jks|keystore|zip|apk|so|iml)|(\.idea|\.vscode|\.fleet|\.settings)(/.*)?|jniLibs(/.*)?)$'
+risky_path_pattern='(^|/)(\.env(\..+)?|local\.properties|id_(rsa|ed25519|ecdsa|dsa)|src/model_data\.c|(service[-_]?account([_-][^/]*)?|credentials?|application_default_credentials|client_secret[^/]*|google-services|firebase-adminsdk[^/]*)\.json|.*\.(pem|key|p12|jks|keystore|zip|apk|so|iml)|(\.idea|\.vscode|\.fleet|\.settings)(/.*)?|jniLibs(/.*)?)$'
 history_paths=$(git log --all --name-only --format=)
 git_status=$?
 test "$git_status" -eq 0 || exit "$git_status"
@@ -556,7 +601,172 @@ test "$rg_status" -eq 1 || exit "$rg_status"
 
 Expected: no matches. Any match blocks publication and requires an explicit remediation task.
 
-- [ ] **Step 4: Run the full release candidate verification**
+- [ ] **Step 4: Validate the hardened gates with fictitious fixtures**
+
+Use a temporary repository containing only fictitious values. The fixture
+generates the credential-like body from separate shell fragments so the plan
+itself does not contain a credential-pattern match. Every added path must be
+reported by both path gates; commit and annotated-tag message matches must be
+reported only by object ID/ref name. All three gates must return non-zero, and
+none of their logs may contain the matching body.
+
+```bash
+fixture_root=$(mktemp -d)
+fixture_repo="$fixture_root/repo"
+git init -q "$fixture_repo"
+git -C "$fixture_repo" config user.name 'Release Audit Fixture'
+git -C "$fixture_repo" config user.email 'fixture@example.invalid'
+fixture_body=$(printf '%s%s' 'api_' 'key=FIXTURE_ONLY_DO_NOT_USE_12345678901234567890')
+printf '%s\n' \
+  '.env.local' \
+  'config/.env.production' \
+  'keys/id_ed25519' \
+  'keys/id_ecdsa' \
+  'keys/id_dsa' \
+  'config/service-account.json' \
+  'config/application_default_credentials.json' \
+  'config/credentials.json' \
+  'config/client_secret_fixture.json' \
+  'android/app/google-services.json' \
+  'config/firebase-adminsdk-fixture.json' \
+  > "$fixture_root/paths"
+while IFS= read -r fixture_path; do
+  mkdir -p "$fixture_repo/$(dirname "$fixture_path")"
+  printf '%s\n' "$fixture_body" > "$fixture_repo/$fixture_path"
+done < "$fixture_root/paths"
+git -C "$fixture_repo" add .
+git -C "$fixture_repo" commit -q -m 'add fictitious risky paths'
+
+run_current_path_gate() (
+  cd "$fixture_repo" || exit 2
+  risky_path_pattern='(^|/)(\.env(\..+)?|local\.properties|id_(rsa|ed25519|ecdsa|dsa)|src/model_data\.c|(service[-_]?account([_-][^/]*)?|credentials?|application_default_credentials|client_secret[^/]*|google-services|firebase-adminsdk[^/]*)\.json|.*\.(pem|key|p12|jks|keystore|zip|apk|so|iml)|(\.idea|\.vscode|\.fleet|\.settings)(/.*)?|jniLibs(/.*)?)$'
+  tracked_paths=$(git ls-files)
+  git_status=$?
+  test "$git_status" -eq 0 || exit "$git_status"
+  risky_paths=$(printf '%s\n' "$tracked_paths" | rg "$risky_path_pattern")
+  rg_status=$?
+  if [ "$rg_status" -eq 0 ]; then
+    printf 'risky tracked path: %s\n' "$risky_paths" >&2
+    exit 1
+  fi
+  test "$rg_status" -eq 1 || exit "$rg_status"
+)
+
+run_history_path_gate() (
+  cd "$fixture_repo" || exit 2
+  risky_path_pattern='(^|/)(\.env(\..+)?|local\.properties|id_(rsa|ed25519|ecdsa|dsa)|src/model_data\.c|(service[-_]?account([_-][^/]*)?|credentials?|application_default_credentials|client_secret[^/]*|google-services|firebase-adminsdk[^/]*)\.json|.*\.(pem|key|p12|jks|keystore|zip|apk|so|iml)|(\.idea|\.vscode|\.fleet|\.settings)(/.*)?|jniLibs(/.*)?)$'
+  history_paths=$(git log --all --name-only --format=)
+  git_status=$?
+  test "$git_status" -eq 0 || exit "$git_status"
+  risky_paths=$(printf '%s\n' "$history_paths" | rg "$risky_path_pattern")
+  rg_status=$?
+  if [ "$rg_status" -eq 0 ]; then
+    printf 'risky historical path: %s\n' "$risky_paths" >&2
+    exit 1
+  fi
+  test "$rg_status" -eq 1 || exit "$rg_status"
+)
+
+current_log="$fixture_root/current-path.log"
+if run_current_path_gate > "$current_log" 2>&1; then
+  current_status=0
+else
+  current_status=$?
+fi
+history_log="$fixture_root/history-path.log"
+if run_history_path_gate > "$history_log" 2>&1; then
+  history_status=0
+else
+  history_status=$?
+fi
+test "$current_status" -ne 0
+test "$history_status" -ne 0
+while IFS= read -r fixture_path; do
+  rg -q -F "$fixture_path" "$current_log"
+  rg -q -F "$fixture_path" "$history_log"
+done < "$fixture_root/paths"
+
+git -C "$fixture_repo" commit --allow-empty -q -m "$fixture_body"
+commit_oid=$(git -C "$fixture_repo" rev-parse HEAD)
+git -C "$fixture_repo" tag -a fixture-message -m "$fixture_body"
+tag_oid=$(git -C "$fixture_repo" rev-parse 'refs/tags/fixture-message^{tag}')
+
+run_message_gate() (
+  cd "$fixture_repo" || exit 2
+  credential_pattern='(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[A-Za-z0-9_]{30,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|password[[:space:]]*[:=]|api[_-]?key[[:space:]]*[:=]|secret[[:space:]]*[:=])'
+  found=0
+  message_tmp=$(mktemp -d)
+  git rev-list --all > "$message_tmp/commits"
+  git_status=$?
+  test "$git_status" -eq 0 || exit "$git_status"
+  while IFS= read -r commit; do
+    git cat-file commit "$commit" > "$message_tmp/object"
+    git_status=$?
+    test "$git_status" -eq 0 || exit "$git_status"
+    sed '1,/^$/d' "$message_tmp/object" > "$message_tmp/message"
+    sed_status=$?
+    test "$sed_status" -eq 0 || exit "$sed_status"
+    rg -q "$credential_pattern" "$message_tmp/message"
+    rg_status=$?
+    if [ "$rg_status" -eq 0 ]; then
+      printf 'credential pattern match in commit message: %s\n' "$commit" >&2
+      found=1
+    elif [ "$rg_status" -ne 1 ]; then
+      exit "$rg_status"
+    fi
+  done < "$message_tmp/commits"
+  git for-each-ref \
+    --format='%(objecttype)%09%(objectname)%09%(refname)' refs/tags \
+    > "$message_tmp/tags"
+  git_status=$?
+  test "$git_status" -eq 0 || exit "$git_status"
+  tab=$(printf '\t')
+  while IFS="$tab" read -r object_type object_id ref; do
+    test "$object_type" = tag || continue
+    git cat-file tag "$object_id" > "$message_tmp/object"
+    git_status=$?
+    test "$git_status" -eq 0 || exit "$git_status"
+    sed '1,/^$/d' "$message_tmp/object" > "$message_tmp/message"
+    sed_status=$?
+    test "$sed_status" -eq 0 || exit "$sed_status"
+    rg -q "$credential_pattern" "$message_tmp/message"
+    rg_status=$?
+    if [ "$rg_status" -eq 0 ]; then
+      printf 'credential pattern match in annotated tag message: %s (%s)\n' \
+        "$object_id" "$ref" >&2
+      found=1
+    elif [ "$rg_status" -ne 1 ]; then
+      exit "$rg_status"
+    fi
+  done < "$message_tmp/tags"
+  rm -rf "$message_tmp"
+  test "$found" -eq 0
+)
+
+message_log="$fixture_root/message.log"
+if run_message_gate > "$message_log" 2>&1; then
+  message_status=0
+else
+  message_status=$?
+fi
+test "$message_status" -ne 0
+rg -q -F "$commit_oid" "$message_log"
+rg -q -F "$tag_oid" "$message_log"
+rg -q -F 'refs/tags/fixture-message' "$message_log"
+if rg -q -F "$fixture_body" \
+  "$current_log" "$history_log" "$message_log"; then
+  printf 'fixture body leaked into an audit log\n' >&2
+  exit 1
+fi
+rm -rf "$fixture_root"
+```
+
+Expected: all assertions exit 0. The captured gate statuses are non-zero, every
+fixture path appears in both path-only logs, the commit/tag logs contain only
+the relevant object IDs/ref name, and the fictitious matching body is absent
+from every log.
+
+- [ ] **Step 5: Run the full release candidate verification**
 
 In an isolated worktree, `src/model_data.c` is absent by design. Read the
 trusted local calibration output at
@@ -584,7 +794,7 @@ test -z "$(git ls-files -- src/model_data.c)"
 test -z "$(git diff --cached --name-only -- src/model_data.c)"
 ```
 
-- [ ] **Step 5: Commit the implementation plan and any justified ignore correction**
+- [ ] **Step 6: Commit the implementation plan and any justified ignore correction**
 
 If `.gitignore` required a justified correction, run:
 

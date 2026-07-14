@@ -426,6 +426,7 @@ Java_com_tpv_bench_TpvNative_visionCloseV3(JNIEnv *env, jobject thiz, jlong hand
     (void)env; (void)thiz;
     VisionHandle *handle = vision_handle_from_jlong(handle_value);
     if (!handle) return;
+    if (handle->ctx) tpv_vision_reset(handle->ctx);
     free(handle->mem);
     memset(handle, 0, sizeof *handle);
     free(handle);

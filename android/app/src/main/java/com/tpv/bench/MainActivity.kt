@@ -219,7 +219,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun onModeClicked() {
         if (running.get()) {
-            toast("Stop the run before switching recognition mode")
+            toast("Stop the run before switching detection mode")
             return
         }
         val nextMode = if (settings.recognitionMode == RecognitionMode.FACE) {
@@ -228,7 +228,7 @@ class MainActivity : AppCompatActivity() {
             RecognitionMode.FACE
         }
         applyRecognitionMode(nextMode)
-        toast("Recognition mode: ${nextMode.displayName}")
+        toast("Detection mode: ${nextMode.displayName}")
     }
 
     private fun applyRecognitionMode(mode: RecognitionMode) {
@@ -793,7 +793,7 @@ class MainActivity : AppCompatActivity() {
 
         runOnUiThread {
             if (statusText != null) statusLine.text = statusText
-            hud.text = "Mode: FACE    Faces: $detectionCount    Tracks: $trackCount\nObject recognition disabled"
+            hud.text = "Mode: FACE    Faces: $detectionCount    Tracks: $trackCount\nObject detection disabled"
         }
     }
 
@@ -830,11 +830,11 @@ class MainActivity : AppCompatActivity() {
         // ---- Pipeline ----
         container.addView(sectionHeader("Pipeline"))
         val faceModeCb = CheckBox(this).apply {
-            text = "Face recognition mode (object recognition off)"
+            text = "Face detection mode (object detection off)"
             isChecked = settings.recognitionMode == RecognitionMode.FACE
         }
         val modeNote = TextView(this).apply {
-            text = "Only one recognition engine runs per Start."
+            text = "Only one detection engine runs per Start."
             textSize = 12f
             setPadding(0, 0, 0, 8)
         }

@@ -138,6 +138,14 @@ int tpv_vision_init(void *mem, size_t bytes,
     if (bytes < sizeof(tpv_vision_context)) return TPV_BAD_INPUT;
 
     tpv_vision_context *ctx = (tpv_vision_context *)mem;
+#ifdef TPV_DEBUG_FEATURES
+    if (s_debug_v2_owner == ctx) {
+        memset(&s_debug_v2, 0, sizeof s_debug_v2);
+        s_debug_v2_status = TPV_BAD_INPUT;
+        s_debug_v2_valid = 0;
+        s_debug_v2_owner = 0;
+    }
+#endif
     memset(ctx, 0, sizeof *ctx);
     ctx->config = *cfg;
     ctx->next_detection_id = 1;

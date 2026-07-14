@@ -351,6 +351,43 @@ TEST(t_vision_debug_cache_is_owned_by_the_processing_context) {
     CHECK_EQ_I(tpv_vision_last_debug_v2(ctx_b, &debug), TPV_OK);
 }
 
+TEST(t_vision_debug_cache_is_invalidated_when_storage_is_reinitialized) {
+    paint_dark_square_on_bright_bg(320, 240, 20);
+
+    tpv_vision_config cfg;
+    tpv_vision_default_config(&cfg);
+    cfg.dark_object_mode = 1;
+
+    uint8_t storage[4096];
+    tpv_vision_context *ctx = 0;
+    CHECK_EQ_I(tpv_vision_init(storage, sizeof storage, &cfg, &ctx), TPV_OK);
+
+    tpv_vision_frame vf;
+    memset(&vf, 0, sizeof vf);
+    vf.data = frame;
+    vf.width = TPV_WIDTH;
+    vf.height = TPV_HEIGHT;
+    vf.stride = TPV_WIDTH;
+    vf.format = TPV_PIXEL_Y8_640X480;
+
+    tpv_vision_detection detection;
+    tpv_vision_result result;
+    memset(&result, 0, sizeof result);
+    result.detections = &detection;
+    result.detection_capacity = 1;
+    CHECK_EQ_I(tpv_vision_process(ctx, &vf, &result), TPV_OK);
+
+    tpv_DetectionDebugV2 debug;
+    CHECK_EQ_I(tpv_vision_last_debug_v2(ctx, &debug), TPV_OK);
+
+    tpv_vision_context *reinitialized_ctx = 0;
+    CHECK_EQ_I(
+        tpv_vision_init(storage, sizeof storage, &cfg, &reinitialized_ctx),
+        TPV_OK);
+    CHECK(reinitialized_ctx == ctx);
+    CHECK_EQ_I(tpv_vision_last_debug_v2(reinitialized_ctx, &debug), TPV_BAD_INPUT);
+}
+
 int main(void) {
     RUN(t_v2_bright_square_matches_v1_decision);
     RUN(t_v2_dark_object_mode_inverts_threshold);
@@ -365,5 +402,6 @@ int main(void) {
     RUN(t_v2_relaxed_threshold_does_not_absorb_cast_shadow);
     RUN(t_vision_api_uses_runtime_v2_config);
     RUN(t_vision_debug_cache_is_owned_by_the_processing_context);
+    RUN(t_vision_debug_cache_is_invalidated_when_storage_is_reinitialized);
     FINISH();
 }
