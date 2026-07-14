@@ -488,7 +488,17 @@ git commit -m "docs: add bilingual project README"
 Run:
 
 ```bash
-git ls-files | rg '(^|/)(\.env|local\.properties|id_rsa|.*\.(pem|key|p12|jks|keystore)|.*\.zip|.*\.apk)$' || true
+risky_path_pattern='(^|/)(\.env|local\.properties|id_rsa|src/model_data\.c|.*\.(pem|key|p12|jks|keystore|zip|apk|so)|\.idea(/.*)?|jniLibs(/.*)?)$'
+tracked_paths=$(git ls-files)
+git_status=$?
+test "$git_status" -eq 0 || exit "$git_status"
+risky_paths=$(printf '%s\n' "$tracked_paths" | rg "$risky_path_pattern")
+rg_status=$?
+if [ "$rg_status" -eq 0 ]; then
+  printf 'risky tracked path: %s\n' "$risky_paths" >&2
+  exit 1
+fi
+test "$rg_status" -eq 1 || exit "$rg_status"
 git status --ignored --short
 git ls-files -z | xargs -0 stat -f '%z %N' | sort -nr | head -30
 ```
@@ -500,7 +510,14 @@ Expected: no secrets, signing keys, APKs, run archives, `local.properties`, `src
 Run:
 
 ```bash
-git grep -n -I -E '(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[A-Za-z0-9_]{30,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|password[[:space:]]*[:=]|api[_-]?key[[:space:]]*[:=]|secret[[:space:]]*[:=])' -- . ':(exclude)android/gradlew' || true
+credential_pattern='(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[A-Za-z0-9_]{30,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|password[[:space:]]*[:=]|api[_-]?key[[:space:]]*[:=]|secret[[:space:]]*[:=])'
+credential_paths=$(git grep -l -I -E "$credential_pattern" -- . ':(exclude)android/gradlew')
+grep_status=$?
+if [ "$grep_status" -eq 0 ]; then
+  printf 'credential pattern match in tracked file: %s\n' "$credential_paths" >&2
+  exit 1
+fi
+test "$grep_status" -eq 1 || exit "$grep_status"
 ```
 
 Expected: no matches requiring remediation.
@@ -510,18 +527,31 @@ Expected: no matches requiring remediation.
 Run:
 
 ```bash
+credential_pattern='(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[A-Za-z0-9_]{30,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|password[[:space:]]*[:=]|api[_-]?key[[:space:]]*[:=]|secret[[:space:]]*[:=])'
 found=0
 for commit in $(git rev-list --all); do
-  if git grep -I -l -E '(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[A-Za-z0-9_]{30,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----)' "$commit" -- . >/dev/null; then
-    printf 'credential pattern match in %s\n' "$commit"
+  credential_paths=$(git grep -I -l -E "$credential_pattern" "$commit" -- . ':(exclude)android/gradlew')
+  grep_status=$?
+  if [ "$grep_status" -eq 0 ]; then
+    printf 'credential pattern match in %s: %s\n' "$commit" "$credential_paths" >&2
     found=1
-  else
-    grep_status=$?
-    test "$grep_status" -eq 1 || exit "$grep_status"
+  elif [ "$grep_status" -ne 1 ]; then
+    exit "$grep_status"
   fi
 done
 test "$found" -eq 0
-git log --all --name-only --format= | rg '(^|/)(\.env|local\.properties|id_rsa|.*\.(pem|key|p12|jks|keystore)|.*\.zip|.*\.apk)$' || true
+
+risky_path_pattern='(^|/)(\.env|local\.properties|id_rsa|src/model_data\.c|.*\.(pem|key|p12|jks|keystore|zip|apk|so)|\.idea(/.*)?|jniLibs(/.*)?)$'
+history_paths=$(git log --all --name-only --format=)
+git_status=$?
+test "$git_status" -eq 0 || exit "$git_status"
+risky_paths=$(printf '%s\n' "$history_paths" | rg "$risky_path_pattern")
+rg_status=$?
+if [ "$rg_status" -eq 0 ]; then
+  printf 'risky historical path: %s\n' "$risky_paths" >&2
+  exit 1
+fi
+test "$rg_status" -eq 1 || exit "$rg_status"
 ```
 
 Expected: no matches. Any match blocks publication and requires an explicit remediation task.
@@ -534,7 +564,14 @@ trusted local calibration output at
 use `apply_patch` to create the exact same ignored file temporarily in the
 isolated worktree. Confirm `git check-ignore -q src/model_data.c` before the
 Android gates. After verification, delete the temporary file with
-`apply_patch` and confirm it was never staged or committed.
+`apply_patch`, then prove it is absent from the filesystem, tracked index, and
+staging index:
+
+```bash
+test ! -e src/model_data.c
+test -z "$(git ls-files -- src/model_data.c)"
+test -z "$(git diff --cached --name-only -- src/model_data.c)"
+```
 
 Run the complete command set from Task 1 Step 2 again. Expected: all commands exit 0.
 
@@ -545,6 +582,7 @@ If `.gitignore` required a justified correction, run:
 ```bash
 git add docs/superpowers/plans/2026-07-14-github-open-source-release.md
 git add .gitignore
+test "$(git diff --cached --name-only)" = "$(printf '.gitignore\ndocs/superpowers/plans/2026-07-14-github-open-source-release.md')"
 git diff --cached --check
 git commit -m "docs: add open-source release plan"
 ```
@@ -553,6 +591,7 @@ If `.gitignore` did not require changes, run instead:
 
 ```bash
 git add docs/superpowers/plans/2026-07-14-github-open-source-release.md
+test "$(git diff --cached --name-only)" = 'docs/superpowers/plans/2026-07-14-github-open-source-release.md'
 git diff --cached --check
 git commit -m "docs: add open-source release plan"
 ```
