@@ -488,7 +488,7 @@ git commit -m "docs: add bilingual project README"
 Run:
 
 ```bash
-risky_path_pattern='(^|/)(\.env|local\.properties|id_rsa|src/model_data\.c|.*\.(pem|key|p12|jks|keystore|zip|apk|so)|\.idea(/.*)?|jniLibs(/.*)?)$'
+risky_path_pattern='(^|/)(\.env|local\.properties|id_rsa|src/model_data\.c|.*\.(pem|key|p12|jks|keystore|zip|apk|so|iml)|(\.idea|\.vscode|\.fleet|\.settings)(/.*)?|jniLibs(/.*)?)$'
 tracked_paths=$(git ls-files)
 git_status=$?
 test "$git_status" -eq 0 || exit "$git_status"
@@ -511,7 +511,7 @@ Run:
 
 ```bash
 credential_pattern='(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[A-Za-z0-9_]{30,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|password[[:space:]]*[:=]|api[_-]?key[[:space:]]*[:=]|secret[[:space:]]*[:=])'
-credential_paths=$(git grep -l -I -E "$credential_pattern" -- . ':(exclude)android/gradlew')
+credential_paths=$(git grep -l -I -E "$credential_pattern" -- .)
 grep_status=$?
 if [ "$grep_status" -eq 0 ]; then
   printf 'credential pattern match in tracked file: %s\n' "$credential_paths" >&2
@@ -530,7 +530,7 @@ Run:
 credential_pattern='(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[A-Za-z0-9_]{30,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|password[[:space:]]*[:=]|api[_-]?key[[:space:]]*[:=]|secret[[:space:]]*[:=])'
 found=0
 for commit in $(git rev-list --all); do
-  credential_paths=$(git grep -I -l -E "$credential_pattern" "$commit" -- . ':(exclude)android/gradlew')
+  credential_paths=$(git grep -I -l -E "$credential_pattern" "$commit" -- .)
   grep_status=$?
   if [ "$grep_status" -eq 0 ]; then
     printf 'credential pattern match in %s: %s\n' "$commit" "$credential_paths" >&2
@@ -541,7 +541,7 @@ for commit in $(git rev-list --all); do
 done
 test "$found" -eq 0
 
-risky_path_pattern='(^|/)(\.env|local\.properties|id_rsa|src/model_data\.c|.*\.(pem|key|p12|jks|keystore|zip|apk|so)|\.idea(/.*)?|jniLibs(/.*)?)$'
+risky_path_pattern='(^|/)(\.env|local\.properties|id_rsa|src/model_data\.c|.*\.(pem|key|p12|jks|keystore|zip|apk|so|iml)|(\.idea|\.vscode|\.fleet|\.settings)(/.*)?|jniLibs(/.*)?)$'
 history_paths=$(git log --all --name-only --format=)
 git_status=$?
 test "$git_status" -eq 0 || exit "$git_status"
@@ -562,18 +562,27 @@ In an isolated worktree, `src/model_data.c` is absent by design. Read the
 trusted local calibration output at
 `/Users/chen/work/tiny-pick-vision/src/model_data.c`, record its SHA-256, and
 use `apply_patch` to create the exact same ignored file temporarily in the
-isolated worktree. Confirm `git check-ignore -q src/model_data.c` before the
-Android gates. After verification, delete the temporary file with
-`apply_patch`, then prove it is absent from the filesystem, tracked index, and
-staging index:
+isolated worktree. Before any Android gate, verify the temporary input exists,
+is ignored, and is absent from both the tracked and staging indexes:
+
+```bash
+test -f src/model_data.c
+git check-ignore -q src/model_data.c
+test -z "$(git ls-files -- src/model_data.c)"
+test -z "$(git diff --cached --name-only -- src/model_data.c)"
+```
+
+Run the complete command set from Task 1 Step 2 again. Expected: all commands exit 0.
+
+Only after the complete verification suite exits 0, delete the temporary
+`src/model_data.c` with `apply_patch`. Then prove it is absent from the
+filesystem, tracked index, and staging index before staging the allowlist:
 
 ```bash
 test ! -e src/model_data.c
 test -z "$(git ls-files -- src/model_data.c)"
 test -z "$(git diff --cached --name-only -- src/model_data.c)"
 ```
-
-Run the complete command set from Task 1 Step 2 again. Expected: all commands exit 0.
 
 - [ ] **Step 5: Commit the implementation plan and any justified ignore correction**
 
