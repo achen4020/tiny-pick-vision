@@ -1,6 +1,6 @@
 package com.tpv.bench.vision
 
-enum class CommitMode { PRIMARY_ONLY }
+enum class CommitMode { PRIMARY_ONLY, LIVE_ONLY }
 
 data class EventPolicyConfig(
     val primaryEventEngine: String = TPV_BLOB_ENGINE_ID,
@@ -21,10 +21,15 @@ class EventPolicy(
             CommitMode.PRIMARY_ONLY -> require(config.enabledCommitEngines == setOf(config.primaryEventEngine)) {
                 "PRIMARY_ONLY requires enabledCommitEngines == setOf(primaryEventEngine)"
             }
+            CommitMode.LIVE_ONLY -> require(config.enabledCommitEngines.isEmpty()) {
+                "LIVE_ONLY requires an empty enabledCommitEngines set"
+            }
         }
     }
 
     val primaryEngineId: String get() = config.primaryEventEngine
+
+    fun commitsEnabled(engineId: String): Boolean = engineId in config.enabledCommitEngines
 
     fun primaryDetections(detections: List<VisionDetection>): List<VisionDetection> =
         detections.filter { it.engineId == config.primaryEventEngine }
@@ -34,4 +39,3 @@ class EventPolicy(
 }
 
 const val TPV_BLOB_ENGINE_ID = "tpv_blob"
-

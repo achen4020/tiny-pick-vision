@@ -109,6 +109,10 @@ int tpv_process_frame_debug_v2(
     int dark_object_mode,
     int roi_x, int roi_y, int roi_w, int roi_h,
     tpv_DetectionDebugV2 *out);
+
+struct tpv_vision_context;
+int tpv_vision_last_debug_v2(const struct tpv_vision_context *ctx,
+                             tpv_DetectionDebugV2 *out);
 #endif  /* TPV_DEBUG_FEATURES */
 
 #endif

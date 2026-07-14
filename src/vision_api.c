@@ -13,6 +13,9 @@ struct tpv_vision_context {
 
 #ifdef TPV_DEBUG_FEATURES
 static tpv_DetectionDebugV2 s_debug_v2;
+static int s_debug_v2_status = TPV_BAD_INPUT;
+static uint8_t s_debug_v2_valid;
+static const tpv_vision_context *s_debug_v2_owner;
 #endif
 
 static uint32_t engine_id_to_flag(uint32_t engine_id) {
@@ -147,6 +150,14 @@ void tpv_vision_reset(tpv_vision_context *ctx) {
     if (!ctx) return;
     ctx->next_detection_id = 1;
     tpv_vision_tracker_reset(&ctx->tracker);
+#ifdef TPV_DEBUG_FEATURES
+    if (s_debug_v2_owner == ctx) {
+        memset(&s_debug_v2, 0, sizeof s_debug_v2);
+        s_debug_v2_status = TPV_BAD_INPUT;
+        s_debug_v2_valid = 0;
+        s_debug_v2_owner = 0;
+    }
+#endif
 }
 
 int tpv_vision_process(tpv_vision_context *ctx,
@@ -155,6 +166,10 @@ int tpv_vision_process(tpv_vision_context *ctx,
     if (!ctx || !out) return TPV_BAD_INPUT;
     result_reset(out, TPV_BAD_INPUT);
     out->primary_event_engine = ctx->config.primary_event_engine;
+
+#ifdef TPV_DEBUG_FEATURES
+    if (s_debug_v2_owner == ctx) s_debug_v2_valid = 0;
+#endif
 
     int rc = validate_y8_frame(frame);
     if (rc != TPV_OK) return rc;
@@ -167,6 +182,9 @@ int tpv_vision_process(tpv_vision_context *ctx,
         ctx->config.roi_x, ctx->config.roi_y,
         ctx->config.roi_w, ctx->config.roi_h,
         &s_debug_v2);
+    s_debug_v2_status = rc;
+    s_debug_v2_valid = 1;
+    s_debug_v2_owner = ctx;
 #else
     if (!compact_tpv_config_is_supported(&ctx->config)) {
         out->status = TPV_BAD_INPUT;
@@ -205,3 +223,14 @@ int tpv_vision_process(tpv_vision_context *ctx,
     tpv_vision_policy_apply(&ctx->config, out->detections, out->detection_count);
     return TPV_OK;
 }
+
+#ifdef TPV_DEBUG_FEATURES
+int tpv_vision_last_debug_v2(const tpv_vision_context *ctx,
+                             tpv_DetectionDebugV2 *out) {
+    if (!ctx || !out || !s_debug_v2_valid || s_debug_v2_owner != ctx) {
+        return TPV_BAD_INPUT;
+    }
+    *out = s_debug_v2;
+    return s_debug_v2_status;
+}
+#endif

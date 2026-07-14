@@ -17,6 +17,52 @@ const val FACE_ENGINE_ID = "face"
 const val FACE_ENGINE_MODEL_ASSET = "blaze_face_short_range.tflite"
 const val MEDIAPIPE_TASKS_VISION_VERSION = "0.10.33"
 
+internal class DetectionCadence(targetFps: Int) {
+    private val intervalNs: Long
+    private var lastDetectionNs: Long? = null
+
+    init {
+        require(targetFps > 0) { "targetFps must be positive" }
+        intervalNs = 1_000_000_000L / targetFps
+    }
+
+    fun shouldDetect(timestampNs: Long): Boolean {
+        val last = lastDetectionNs
+        if (last == null || timestampNs - last >= intervalNs) {
+            lastDetectionNs = timestampNs
+            return true
+        }
+        return false
+    }
+}
+
+internal class DetectionCarryState(targetFps: Int) {
+    private val cadence = DetectionCadence(targetFps)
+    private var detections: List<VisionDetection> = emptyList()
+
+    fun shouldDetect(timestampNs: Long): Boolean = cadence.shouldDetect(timestampNs)
+
+    fun onSuccess(current: List<VisionDetection>) {
+        detections = current
+    }
+
+    fun onFailure() {
+        detections = emptyList()
+    }
+
+    fun carryToFrame(frameIdxInRun: Long): List<VisionDetection> =
+        detections.mapIndexed { index, detection ->
+            detection.copy(
+                detectionId = frameIdxInRun * 10_000L + index,
+                frameIdxInRun = frameIdxInRun,
+            )
+        }
+
+    fun clear() {
+        detections = emptyList()
+    }
+}
+
 data class FaceEngineConfig(
     val enabled: Boolean,
     val modelAssetPath: String = FACE_ENGINE_MODEL_ASSET,
@@ -44,6 +90,8 @@ class FaceEngine(
     )
     private var bitmap: Bitmap? = null
     private var lastTimestampMs = Long.MIN_VALUE
+    private val detectionState = DetectionCarryState(targetFps = 12)
+    private var lastRawResult: FaceDetectorResult? = null
 
     override val metadata = VisionEngineMetadata(
         id = FACE_ENGINE_ID,
@@ -56,19 +104,37 @@ class FaceEngine(
     )
 
     override fun process(frame: VisionFrame): EngineFrameResult {
+        if (!detectionState.shouldDetect(frame.tCameraArriveNs)) {
+            return EngineFrameResult(
+                FACE_ENGINE_ID,
+                detectionState.carryToFrame(frame.frameIdxInRun),
+                lastRawResult,
+                System.nanoTime(),
+            )
+        }
         val argb = frame.buffers.argb8888()
         val bitmap = reusableBitmap(frame.nativeW, frame.nativeH)
         bitmap.setPixels(argb, 0, frame.nativeW, 0, 0, frame.nativeW, frame.nativeH)
 
         val timestampMs = nextTimestampMs(frame.tCameraArriveNs / 1_000_000L)
-        val result = detector.detectForVideo(BitmapImageBuilder(bitmap).build(), timestampMs)
-        val detections = result.toVisionDetections(frame)
-        return EngineFrameResult(FACE_ENGINE_ID, detections, result, System.nanoTime())
+        return try {
+            val result = detector.detectForVideo(BitmapImageBuilder(bitmap).build(), timestampMs)
+            val detections = result.toVisionDetections(frame)
+            detectionState.onSuccess(detections)
+            lastRawResult = result
+            EngineFrameResult(FACE_ENGINE_ID, detections, result, System.nanoTime())
+        } catch (t: Throwable) {
+            detectionState.onFailure()
+            lastRawResult = null
+            throw t
+        }
     }
 
     override fun close() {
         detector.close()
         bitmap = null
+        detectionState.clear()
+        lastRawResult = null
     }
 
     private fun reusableBitmap(width: Int, height: Int): Bitmap {

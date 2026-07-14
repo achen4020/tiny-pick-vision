@@ -14,6 +14,36 @@ import org.junit.Test
 
 class TpvBlobEngineTest {
     @Test
+    fun `processes each frame through native vision only once`() {
+        val raw = debug(status = TpvBlobEngine.TPV_STATUS_OK, classId = 2)
+        var visionCalls = 0
+        val adapter = object : TpvNativeAdapter {
+            override fun visionCreateV3(config: TpvBlobConfig): Long = 42L
+            override fun visionCloseV3(handle: Long) = Unit
+
+            override fun processVisionFrameV3(
+                handle: Long,
+                y: ByteArray,
+                width: Int,
+                height: Int,
+                outTimingNs: LongArray,
+            ): TpvVisionResult {
+                visionCalls++
+                return vision(classId = 2)
+            }
+
+            override fun visionLastDebugV2(handle: Long): TpvDetectionDebugV2 = raw
+        }
+
+        TpvBlobEngine(
+            TpvBlobConfig(120, true, YuvAdapter.CropRect(0, 0, 640, 480), "sha"),
+            adapter,
+        ).process(frame())
+
+        assertEquals(1, visionCalls)
+    }
+
+    @Test
     fun `empty status returns raw and no detections`() {
         val raw = debug(status = TpvBlobEngine.TPV_STATUS_EMPTY, classId = 0)
         val engine = engineReturning(raw)
@@ -63,24 +93,6 @@ class TpvBlobEngineTest {
     ) = TpvBlobEngine(
         TpvBlobConfig(120, true, YuvAdapter.CropRect(0, 0, 640, 480), "sha"),
         object : TpvNativeAdapter {
-            override fun processFrameDebugV2(
-                y: ByteArray,
-                width: Int,
-                height: Int,
-                binThreshold: Int,
-                darkObjectMode: Boolean,
-                roiX: Int,
-                roiY: Int,
-                roiW: Int,
-                roiH: Int,
-                outTimingNs: LongArray,
-            ): TpvDetectionDebugV2 {
-                outTimingNs[0] = 1
-                outTimingNs[1] = 2
-                outTimingNs[2] = 3
-                return raw
-            }
-
             override fun visionCreateV3(config: TpvBlobConfig): Long = 42L
 
             override fun visionCloseV3(handle: Long) = Unit
@@ -98,6 +110,8 @@ class TpvBlobEngineTest {
                 outTimingNs[2] = 6
                 return vision
             }
+
+            override fun visionLastDebugV2(handle: Long): TpvDetectionDebugV2 = raw
         },
     )
 

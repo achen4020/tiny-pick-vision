@@ -27,6 +27,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import com.tpv.bench.vision.EventPolicyConfig
+import com.tpv.bench.vision.CommitMode
 import com.tpv.bench.vision.FACE_ENGINE_ID
 import com.tpv.bench.vision.FACE_ENGINE_MODEL_ASSET
 import com.tpv.bench.vision.FaceEngine
@@ -567,8 +568,8 @@ class MainActivity : AppCompatActivity() {
                 tpvStatus = result.det.status, tpvClassId = timingClassId,
                 tCameraArriveNs = tCamArrive,
                 tJniEnterNs  = timingBuf[0],    // JNI entry, C side
-                tTpvEnterNs  = timingBuf[1],    // immediately before tpv_process_frame_debug
-                tTpvExitNs   = timingBuf[2],    // immediately after  tpv_process_frame_debug
+                tTpvEnterNs  = timingBuf[1],    // immediately before tpv_vision_process
+                tTpvExitNs   = timingBuf[2],    // after TPV + native tracker/policy
                 tJniReturnNs = tJniReturn       // back in Kotlin
             ))
             val obs = FrameObservation(
@@ -1007,7 +1008,16 @@ class MainActivity : AppCompatActivity() {
             tracker = tracker,
             policyConfig = EventPolicyConfig(
                 primaryEventEngine = primaryEngineId(s),
-                enabledCommitEngines = setOf(primaryEngineId(s)),
+                enabledCommitEngines = if (s.recognitionMode == RecognitionMode.FACE) {
+                    emptySet()
+                } else {
+                    setOf(primaryEngineId(s))
+                },
+                mode = if (s.recognitionMode == RecognitionMode.FACE) {
+                    CommitMode.LIVE_ONLY
+                } else {
+                    CommitMode.PRIMARY_ONLY
+                },
             ),
         )
     }
@@ -1060,9 +1070,13 @@ class MainActivity : AppCompatActivity() {
                 )
             ),
             eventPolicy = VisionEventPolicyRunConfig(
-                mode = "PRIMARY_ONLY",
+                mode = if (s.recognitionMode == RecognitionMode.FACE) "LIVE_ONLY" else "PRIMARY_ONLY",
                 primaryEventEngine = primaryEngineId(s),
-                enabledCommitEngines = listOf(primaryEngineId(s)),
+                enabledCommitEngines = if (s.recognitionMode == RecognitionMode.FACE) {
+                    emptyList()
+                } else {
+                    listOf(primaryEngineId(s))
+                },
             ),
             tracker = VisionTrackerRunConfig(
                 type = if (s.trackerEnabled) "sort_like" else "noop",

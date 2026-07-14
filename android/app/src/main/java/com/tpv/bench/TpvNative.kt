@@ -171,6 +171,8 @@ object TpvNative {
         outTimingNs: LongArray,
     ): TpvVisionResult
 
+    external fun visionLastDebugV2(handle: Long): TpvDetectionDebugV2
+
     /** Reads `extern const uint8_t tpv_bin_threshold` from libtpv.so. */
     external fun binThreshold(): Int
 

@@ -11,7 +11,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 enum class BenchCameraLens(
     val lensFacing: Int,
@@ -28,6 +28,18 @@ enum class BenchCameraLens(
         fun fromLensFacing(lensFacing: Int): BenchCameraLens =
             values().firstOrNull { it.lensFacing == lensFacing } ?: BACK
     }
+}
+
+internal class CameraStartGeneration {
+    private val generation = AtomicLong(0)
+
+    fun begin(): Long = generation.incrementAndGet()
+
+    fun cancel() {
+        generation.incrementAndGet()
+    }
+
+    fun isCurrent(candidate: Long): Boolean = generation.get() == candidate
 }
 
 /**
@@ -47,10 +59,9 @@ class CameraAdapter(private val ctx: Context) {
     var nativeH = 0 ; private set
 
     private var provider: ProcessCameraProvider? = null
-    /** Latched true by stop(); start() resets to false. Listener bails if set
-     *  before bind, so a Stop clicked during async provider init doesn't leave
-     *  the camera running after the UI has returned to "stopped". */
-    private val cancelled = AtomicBoolean(false)
+    /** Each start owns a unique generation. A later stop/start can never make
+     * an older asynchronous provider listener current again. */
+    private val startGeneration = CameraStartGeneration()
 
     fun start(
         lifecycleOwner: LifecycleOwner,
@@ -59,14 +70,15 @@ class CameraAdapter(private val ctx: Context) {
         onError: (Throwable) -> Unit = {},
         onFrame: (proxy: ImageProxy) -> Unit,
     ) {
-        cancelled.set(false)
+        val generation = startGeneration.begin()
         nativeW = 0
         nativeH = 0
         val fut = ProcessCameraProvider.getInstance(ctx)
         fut.addListener({
-            if (cancelled.get()) return@addListener   // stop() beat us here
+            if (!startGeneration.isCurrent(generation)) return@addListener
             try {
                 val p = fut.get()
+                if (!startGeneration.isCurrent(generation)) return@addListener
                 provider = p
                 val selector = CameraSelector.Builder()
                     .requireLensFacing(lens.lensFacing)
@@ -84,13 +96,14 @@ class CameraAdapter(private val ctx: Context) {
                     onFrame(proxy)
                 }
                 p.unbindAll()
-                if (cancelled.get()) return@addListener
+                if (!startGeneration.isCurrent(generation)) return@addListener
                 p.bindToLifecycle(
                     lifecycleOwner,
                     selector,
                     preview, analysis
                 )
             } catch (t: Throwable) {
+                if (!startGeneration.isCurrent(generation)) return@addListener
                 provider?.unbindAll()
                 provider = null
                 onError(t)
@@ -99,7 +112,7 @@ class CameraAdapter(private val ctx: Context) {
     }
 
     fun stop() {
-        cancelled.set(true)
+        startGeneration.cancel()
         provider?.unbindAll()
         provider = null
     }

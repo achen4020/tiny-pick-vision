@@ -115,6 +115,59 @@ static int init_cache_v2(JNIEnv *env) {
     return 0;
 }
 
+static jobject new_debug_v2_object(JNIEnv *env,
+                                   const tpv_DetectionDebugV2 *out,
+                                   int status) {
+    if (!out || init_cache_v2(env) < 0) return NULL;
+
+    jobject det_obj = (*env)->NewObject(env, s_cache.det_cls, s_cache.det_ctor,
+        (jint)status,
+        (jint)(uint32_t)out->det.class_id,
+        (jint)out->det.x, (jint)out->det.y,
+        (jint)out->det.theta_x10,
+        (jint)(uint32_t)out->det.confidence_q8);
+    if (!det_obj) return NULL;
+
+    jintArray hu = (*env)->NewIntArray(env, 7);
+    if (!hu) return NULL;
+    (*env)->SetIntArrayRegion(env, hu, 0, 7, (const jint *)out->features.hu);
+    jobject feat_obj = (*env)->NewObject(env, s_cache.feat_cls, s_cache.feat_ctor,
+        hu,
+        (jint)out->features.perim_ratio,
+        (jint)out->features.eccentricity,
+        (jint)out->features.m3_axis_sign);
+    if (!feat_obj) return NULL;
+
+    jintArray dsq = (*env)->NewIntArray(env, TPV_N_CLASSES);
+    if (!dsq) return NULL;
+    (*env)->SetIntArrayRegion(env, dsq, 0, TPV_N_CLASSES,
+        (const jint *)out->distances_sq);
+
+    jobject bbox_obj = (*env)->NewObject(env, s_cache_v2.bbox_cls, s_cache_v2.bbox_ctor,
+        (jint)out->bbox_x0,
+        (jint)out->bbox_y0,
+        (jint)(out->bbox_x1 - out->bbox_x0 + 1),
+        (jint)(out->bbox_y1 - out->bbox_y0 + 1));
+    if (!bbox_obj) return NULL;
+
+    const jsize mask_len = TPV_WIDTH * TPV_HEIGHT / 8;
+    jbyteArray bin_arr = (*env)->NewByteArray(env, mask_len);
+    if (!bin_arr) return NULL;
+    (*env)->SetByteArrayRegion(env, bin_arr, 0, mask_len, (const jbyte *)out->bin);
+    jbyteArray all_arr = (*env)->NewByteArray(env, mask_len);
+    if (!all_arr) return NULL;
+    (*env)->SetByteArrayRegion(env, all_arr, 0, mask_len,
+        (const jbyte *)out->all_blobs_mask);
+    jbyteArray mask_arr = (*env)->NewByteArray(env, mask_len);
+    if (!mask_arr) return NULL;
+    (*env)->SetByteArrayRegion(env, mask_arr, 0, mask_len, (const jbyte *)out->mask);
+
+    return (*env)->NewObject(env, s_cache_v2.dbg_v2_cls, s_cache_v2.dbg_v2_ctor,
+        det_obj, feat_obj, dsq,
+        bbox_obj, (jint)out->area_px, (jint)out->grid_8x8,
+        bin_arr, all_arr, mask_arr);
+}
+
 /* v2 uses its own static output buffer so the 115 KB struct is not alloc'd
  * on the stack. Single-threaded camera callback makes this safe. */
 static tpv_DetectionDebugV2 s_v2_out;
@@ -202,6 +255,8 @@ Java_com_tpv_bench_TpvNative_processFrameDebug(
     /* Bracket the real tpv call as tightly as possible. These two
      * timestamps ARE the spec §A2 measurement — everything else (JNI array
      * copies, Java object construction) is outside the gate. */
+    /* v3 timing covers the complete C SDK call: TPV detection plus native
+     * tracker and primary-event policy. JNI marshaling remains outside. */
     jlong t_tpv_enter = monotonic_ns();
     tpv_DetectionDebug out;
     int rc = tpv_process_frame_debug(s_frame_buf, w, h, &out);
@@ -293,69 +348,7 @@ Java_com_tpv_bench_TpvNative_processFrameDebugV2(
     jlong times[3] = { t_jni_enter, t_tpv_enter, t_tpv_exit };
     (*env)->SetLongArrayRegion(env, out_timing_ns, 0, 3, times);
 
-    (void)rc;  /* caller inspects det.status (== rc) */
-
-    /* Build v1 det + features + distances objects (reuse v1 cache).
-     * Every JNI allocation below can return NULL with a pending exception
-     * (OOM / class-not-found). Per JNI spec, passing NULL to subsequent
-     * SetXxxArrayRegion / NewObject calls is undefined behavior, so we
-     * bail out early on each failure — the pending exception propagates
-     * cleanly to Kotlin. */
-    jobject det_obj = (*env)->NewObject(env, s_cache.det_cls, s_cache.det_ctor,
-        (jint)rc,
-        (jint)(uint32_t)s_v2_out.det.class_id,
-        (jint)s_v2_out.det.x, (jint)s_v2_out.det.y,
-        (jint)s_v2_out.det.theta_x10,
-        (jint)(uint32_t)s_v2_out.det.confidence_q8);
-    if (!det_obj) return NULL;
-
-    jintArray hu = (*env)->NewIntArray(env, 7);
-    if (!hu) return NULL;
-    (*env)->SetIntArrayRegion(env, hu, 0, 7, (const jint *)s_v2_out.features.hu);
-    jobject feat_obj = (*env)->NewObject(env, s_cache.feat_cls, s_cache.feat_ctor,
-        hu,
-        (jint)s_v2_out.features.perim_ratio,
-        (jint)s_v2_out.features.eccentricity,
-        (jint)s_v2_out.features.m3_axis_sign);
-    if (!feat_obj) return NULL;
-
-    jintArray dsq = (*env)->NewIntArray(env, TPV_N_CLASSES);
-    if (!dsq) return NULL;
-    (*env)->SetIntArrayRegion(env, dsq, 0, TPV_N_CLASSES,
-        (const jint *)s_v2_out.distances_sq);
-
-    /* v2-only objects.
-     * bbox_{x1,y1} are INCLUSIVE endpoints (closed interval, matches
-     * tpv_Blob convention — see include/tpv_internal.h above
-     * tpv_DetectionDebugV2.bbox_x0 and src/ccl_moments.c ~line 149 Pass 3
-     * `x <= bbox_x1` iteration), so convert to (w, h) with +1. */
-    jobject bbox_obj = (*env)->NewObject(env, s_cache_v2.bbox_cls, s_cache_v2.bbox_ctor,
-        (jint)s_v2_out.bbox_x0,
-        (jint)s_v2_out.bbox_y0,
-        (jint)(s_v2_out.bbox_x1 - s_v2_out.bbox_x0 + 1),
-        (jint)(s_v2_out.bbox_y1 - s_v2_out.bbox_y0 + 1));
-    if (!bbox_obj) return NULL;
-
-    /* TODO(v2.4 perf): 3 × 38400 B NewByteArray + SetByteArrayRegion per
-     * frame = ~115 KB/frame Java heap allocation. At ~24 fps this is
-     * 2.8 MB/s GC pressure. If Overlay draw introduces stutter, switch to
-     * Kotlin-owned preallocated ByteArray passed INTO this JNI call and
-     * filled via SetByteArrayRegion, eliminating the allocation. */
-    const jsize MASK_LEN = TPV_WIDTH * TPV_HEIGHT / 8;
-    jbyteArray bin_arr = (*env)->NewByteArray(env, MASK_LEN);
-    if (!bin_arr) return NULL;
-    (*env)->SetByteArrayRegion(env, bin_arr, 0, MASK_LEN, (const jbyte *)s_v2_out.bin);
-    jbyteArray all_arr = (*env)->NewByteArray(env, MASK_LEN);
-    if (!all_arr) return NULL;
-    (*env)->SetByteArrayRegion(env, all_arr, 0, MASK_LEN, (const jbyte *)s_v2_out.all_blobs_mask);
-    jbyteArray mask_arr = (*env)->NewByteArray(env, MASK_LEN);
-    if (!mask_arr) return NULL;
-    (*env)->SetByteArrayRegion(env, mask_arr, 0, MASK_LEN, (const jbyte *)s_v2_out.mask);
-
-    return (*env)->NewObject(env, s_cache_v2.dbg_v2_cls, s_cache_v2.dbg_v2_ctor,
-        det_obj, feat_obj, dsq,
-        bbox_obj, (jint)s_v2_out.area_px, (jint)s_v2_out.grid_8x8,
-        bin_arr, all_arr, mask_arr);
+    return new_debug_v2_object(env, &s_v2_out, rc);
 }
 
 JNIEXPORT jlong JNICALL
@@ -532,6 +525,20 @@ Java_com_tpv_bench_TpvNative_processVisionFrameV3(
         (jint)rc,
         (jint)result.primary_event_engine,
         det_array);
+}
+
+JNIEXPORT jobject JNICALL
+Java_com_tpv_bench_TpvNative_visionLastDebugV2(
+    JNIEnv *env, jobject thiz, jlong handle_value)
+{
+    (void)thiz;
+    VisionHandle *handle = vision_handle_from_jlong(handle_value);
+    if (!handle || !handle->ctx) {
+        throw_illegal_state(env, "tpv_jni: invalid vision handle");
+        return NULL;
+    }
+    int status = tpv_vision_last_debug_v2(handle->ctx, &s_v2_out);
+    return new_debug_v2_object(env, &s_v2_out, status);
 }
 
 JNIEXPORT jint JNICALL

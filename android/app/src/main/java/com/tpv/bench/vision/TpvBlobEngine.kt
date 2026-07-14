@@ -20,19 +20,6 @@ data class TpvBlobConfig(
 )
 
 interface TpvNativeAdapter {
-    fun processFrameDebugV2(
-        y: ByteArray,
-        width: Int,
-        height: Int,
-        binThreshold: Int,
-        darkObjectMode: Boolean,
-        roiX: Int,
-        roiY: Int,
-        roiW: Int,
-        roiH: Int,
-        outTimingNs: LongArray,
-    ): TpvDetectionDebugV2
-
     fun visionCreateV3(config: TpvBlobConfig): Long
 
     fun visionCloseV3(handle: Long)
@@ -44,27 +31,11 @@ interface TpvNativeAdapter {
         height: Int,
         outTimingNs: LongArray,
     ): TpvVisionResult
+
+    fun visionLastDebugV2(handle: Long): TpvDetectionDebugV2
 }
 
 object ProductionTpvNativeAdapter : TpvNativeAdapter {
-    override fun processFrameDebugV2(
-        y: ByteArray,
-        width: Int,
-        height: Int,
-        binThreshold: Int,
-        darkObjectMode: Boolean,
-        roiX: Int,
-        roiY: Int,
-        roiW: Int,
-        roiH: Int,
-        outTimingNs: LongArray,
-    ): TpvDetectionDebugV2 = TpvNative.processFrameDebugV2(
-        y, width, height,
-        binThreshold, darkObjectMode,
-        roiX, roiY, roiW, roiH,
-        outTimingNs,
-    )
-
     override fun visionCreateV3(config: TpvBlobConfig): Long =
         TpvNative.visionCreateV3(
             TpvBlobEngine.TPV_ENGINE_FLAG_TPV_BLOB,
@@ -91,6 +62,9 @@ object ProductionTpvNativeAdapter : TpvNativeAdapter {
     ): TpvVisionResult = TpvNative.processVisionFrameV3(
         handle, y, width, height, outTimingNs,
     )
+
+    override fun visionLastDebugV2(handle: Long): TpvDetectionDebugV2 =
+        TpvNative.visionLastDebugV2(handle)
 }
 
 class TpvBlobEngine(
@@ -98,7 +72,6 @@ class TpvBlobEngine(
     private val nativeAdapter: TpvNativeAdapter = ProductionTpvNativeAdapter,
 ) : VisionEngine, AutoCloseable {
     private val visionHandle: Long = nativeAdapter.visionCreateV3(config)
-    private val debugTimingNs = LongArray(3)
 
     override val metadata = VisionEngineMetadata(
         id = TPV_BLOB_ENGINE_ID,
@@ -111,17 +84,12 @@ class TpvBlobEngine(
     )
 
     override fun process(frame: VisionFrame): EngineFrameResult {
-        val raw = nativeAdapter.processFrameDebugV2(
-            frame.y640, 640, 480,
-            config.binThreshold, config.darkObjectMode,
-            config.roi.x, config.roi.y, config.roi.w, config.roi.h,
-            debugTimingNs,
-        )
         val vision = nativeAdapter.processVisionFrameV3(
             visionHandle,
             frame.y640, 640, 480,
             frame.tpvTimingNs,
         )
+        val raw = nativeAdapter.visionLastDebugV2(visionHandle)
         val tReturnNs = System.nanoTime()
         val detections = if (vision.status == TPV_STATUS_OK) {
             vision.detections.map { it.toVisionDetection(frame.frameIdxInRun, raw) }

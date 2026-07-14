@@ -385,8 +385,10 @@ unzip run.zip -d /tmp/run
 python3 tools/analyze_timing.py /tmp/run/timing.bin
 ```
 
-Prints p50/p95/p99 of `tpv_process_frame_debug` nanosecond latency, with
-PASS/FAIL against the 30 ms p95 gate.
+Prints p50/p95/p99 of the recorded native vision call, with PASS/FAIL against
+the 30 ms p95 gate. In v3 Object mode this interval covers
+`tpv_vision_process()` as a whole: TPV detection plus the native tracker and
+primary-event policy; JNI marshaling remains outside the interval.
 
 ### v2 upgrade (2026-04-24)
 
@@ -515,8 +517,13 @@ Implemented face-detection behavior:
   features must be exposed through `libtpv.so` C ABI.
 - Face detection is run-locked and disabled by default. Enable it from
   Settings → Face Detection; disabled runs do not request ARGB buffers.
-- TPV remains the only `PRIMARY_ONLY` commit source. Face detections are live
-  overlay/tracker signals and do not trigger `TriggerMachine` commits.
+- Object mode uses TPV as the `PRIMARY_ONLY` commit source. Face mode is
+  explicitly `LIVE_ONLY`: detections are overlay/tracker signals and do not
+  trigger `TriggerMachine` commits; `meta.json.vision.event_policy` records an
+  empty `enabled_commit_engines` list so exported metadata matches behavior.
+- MediaPipe face inference is throttled to 12 FPS. Intermediate camera frames
+  reuse the most recent face detections so the tracker and overlay still update
+  at camera cadence.
 - `FrameScopedBufferProvider` materializes ARGB lazily from NV21 only when the
   face engine is enabled and requests it.
 - `OverlayView` draws confirmed face tracks as cyan boxes/labels/landmarks.
@@ -526,6 +533,10 @@ Implemented face-detection behavior:
 - `meta.json.ui_version` remains `v2` for TPV-only runs and becomes `v3` when
   an enabled non-TPV engine is present. `meta.json.vision.engines[id=face]`
   records provider/model/threshold parameters and privacy export flags.
+- The TPV Android adapter calls the v3 C pipeline once per frame, then reads
+  the debug-v2 mask/features cached by that same call. Do not reintroduce a
+  separate `processFrameDebugV2()` call before `processVisionFrameV3()`; doing
+  so doubles TPV work while hiding the first pass from `timing.bin`.
 
 This is face detection, not face recognition. Identity enrollment, embedding
 storage, encrypted gallery management, liveness, and recognition acceptance are

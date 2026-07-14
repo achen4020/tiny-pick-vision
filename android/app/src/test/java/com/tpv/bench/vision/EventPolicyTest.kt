@@ -1,9 +1,26 @@
 package com.tpv.bench.vision
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class EventPolicyTest {
+    @Test
+    fun `live only face policy exposes detections without enabling commits`() {
+        val policy = EventPolicy(
+            EventPolicyConfig(
+                primaryEventEngine = FACE_ENGINE_ID,
+                enabledCommitEngines = emptySet(),
+                mode = CommitMode.LIVE_ONLY,
+            ),
+            setOf(FACE_ENGINE_ID),
+        )
+        val face = detection(FACE_ENGINE_ID, 1)
+
+        assertEquals(listOf(face), policy.primaryDetections(listOf(face)))
+        assertFalse(policy.commitsEnabled(FACE_ENGINE_ID))
+    }
+
     @Test
     fun `accepts default tpv config`() {
         val policy = EventPolicy(EventPolicyConfig(), setOf(TPV_BLOB_ENGINE_ID))
@@ -57,4 +74,3 @@ class EventPolicyTest {
         bbox640 = RectI(0, 0, 10, 10),
     )
 }
-
